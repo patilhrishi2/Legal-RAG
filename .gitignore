@@ -1,0 +1,9 @@
+.env
+storage/
+__pycache__/
+*.pyc
+.venv/
+data/
+legal_dataset.zip
+legal_dataset/
+unnecessary/

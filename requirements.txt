@@ -1,0 +1,6 @@
+flask
+chromadb
+pdfplumber
+google-genai
+python-dotenv
+numpy

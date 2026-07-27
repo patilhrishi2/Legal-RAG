@@ -1,0 +1,1 @@
+https://www.kaggle.com/datasets/adarshsingh0903/legal-dataset-sc-judgments-india-19502024

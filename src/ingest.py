@@ -1,52 +1,43 @@
 # src/ingest.py
-# ─────────────────────────────────────────────────────────────
-# V2 INDEXING PIPELINE
-#
-# Changes from V1:
-#   - Uses Jina AI for embeddings (faster, higher rate limits)
-#   - Calls metadata.py once per document before chunking
-#   - Attaches metadata dict to every chunk in ChromaDB
-#
-# Pipeline:
-#   PDF → extract text → extract metadata (Groq)
-#       → chunk text → embed chunks (Jina) → store with metadata (ChromaDB)
-# ─────────────────────────────────────────────────────────────
+# V2 — Gemini embeddings, correct TPM-aware batching
 
 import os
 import time
-import requests
 import pdfplumber
 import chromadb
+from google import genai
+from google.genai import types
 from dotenv import load_dotenv
 from metadata import extract_metadata
 
 load_dotenv()
+gemini_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
-JINA_API_KEY = os.getenv("JINA_API_KEY")
-
-# ── Constants ─────────────────────────────────────────────────
 PDF_DIR     = "data/cases"
 CHROMA_PATH = "storage/chroma_db"
 COLLECTION  = "legal_cases"
 CHUNK_SIZE  = 400
 OVERLAP     = 50
-JINA_MODEL  = "jina-embeddings-v3"
-JINA_URL    = "https://api.jina.ai/v1/embeddings"
-BATCH_SIZE  = 50    # Jina has no batch size limit but 50 is clean
+EMBED_MODEL = "gemini-embedding-001"
+
+# ── Batch sizing logic ────────────────────────────────────────
+# Gemini free tier: 30,000 tokens/minute
+# Each chunk ≈ 400 words × 1.3 tokens/word ≈ 520 tokens
+# Safe batch: 25 chunks × 520 tokens = 13,000 tokens — well under 30K TPM
+# This means no rate limit waits for typical cases
+BATCH_SIZE = 25
 
 
-# ── PDF → text ────────────────────────────────────────────────
 def extract_text(pdf_path: str) -> str:
     full_text = ""
     with pdfplumber.open(pdf_path) as pdf:
         for page in pdf.pages:
-            page_text = page.extract_text()
-            if page_text:
-                full_text += page_text + "\n"
+            t = page.extract_text()
+            if t:
+                full_text += t + "\n"
     return full_text
 
 
-# ── Text → chunks ─────────────────────────────────────────────
 def chunk_text(text: str) -> list[str]:
     words  = text.split()
     chunks = []
@@ -58,51 +49,47 @@ def chunk_text(text: str) -> list[str]:
     return chunks
 
 
-# ── Chunks → embeddings via Jina AI ──────────────────────────
 def embed_texts(texts: list[str]) -> list[list[float]]:
-    headers = {
-        "Authorization": f"Bearer {JINA_API_KEY}",
-        "Content-Type" : "application/json",
-        "Accept"       : "application/json",
-    }
+    """
+    Embed with Gemini using TPM-aware batching.
 
+    Why 25 chunks per batch:
+      25 chunks × ~520 tokens = ~13,000 tokens per request
+      30,000 TPM limit / 13,000 = ~2 batches per minute safely
+      With a 2s sleep between batches we stay well clear of limits.
+
+    For the large Gopalan case (273 chunks = 11 batches):
+      11 batches × ~3s each = ~33 seconds total. No 60s waits.
+    """
     all_vectors = []
 
     for i in range(0, len(texts), BATCH_SIZE):
         batch = texts[i : i + BATCH_SIZE]
 
-        payload = {
-            "model"     : JINA_MODEL,
-            "task"      : "retrieval.passage",
-            "dimensions": 1024,
-            "input"     : batch,
-        }
-
         while True:
-            response = requests.post(JINA_URL, headers=headers, json=payload)
-
-            if response.status_code == 200:
-                data        = response.json()
-                sorted_data = sorted(data["data"], key=lambda x: x["index"])
-                all_vectors.extend([item["embedding"] for item in sorted_data])
+            try:
+                result = gemini_client.models.embed_content(
+                    model    = EMBED_MODEL,
+                    contents = batch,
+                    config   = types.EmbedContentConfig(
+                        task_type = "RETRIEVAL_DOCUMENT"
+                    )
+                )
+                all_vectors.extend([e.values for e in result.embeddings])
                 print(f"    embedded {min(i + BATCH_SIZE, len(texts))}/{len(texts)} chunks...")
-                time.sleep(0.5)
+                time.sleep(2)   # 2s between batches → ~13K tokens per 2s = well under 30K TPM
                 break
 
-            elif response.status_code == 429:
-                print(f"\n  ⏳ Jina rate limit hit at chunk {i+1}. Waiting 60s...")
-                time.sleep(60)
-                # loop retries the same batch
-
-            else:
-                raise RuntimeError(
-                    f"Jina API error {response.status_code}: {response.text}"
-                )
+            except Exception as e:
+                if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+                    print(f"\n  ⏳ Rate limit hit — waiting 60s...")
+                    time.sleep(60)
+                else:
+                    raise
 
     return all_vectors
 
 
-# ── ChromaDB collection ───────────────────────────────────────
 def get_collection():
     chroma = chromadb.PersistentClient(path=CHROMA_PATH)
     return chroma.get_or_create_collection(
@@ -111,77 +98,65 @@ def get_collection():
     )
 
 
-# ── Ingest one PDF ────────────────────────────────────────────
 def ingest_pdf(pdf_path: str, collection) -> int:
     filename = os.path.basename(pdf_path)
     print(f"\n📄 Processing: {filename}")
 
-    # ── Step 1: extract text ──────────────────────────────────
     text = extract_text(pdf_path)
     if not text.strip():
         print("  ⚠️  No extractable text — skipping.")
         return 0
     print(f"  ✓ Extracted {len(text.split()):,} words")
 
-    # ── Step 2: extract metadata (NEW in V2) ─────────────────
-    # One Groq call per document — NOT per chunk.
-    # Returns a dict with 11 fields (case_name, citation, year, etc.)
     print(f"  ⏳ Extracting metadata via Groq...")
     metadata = extract_metadata(text, filename)
-    print(f"  ✓ Metadata: {metadata['case_name']} | {metadata['citation']} | {metadata['legal_domain']}")
+    print(f"  ✓ {metadata['case_name']} | {metadata['citation']}")
+    print(f"    {metadata['bench_type']} ({metadata['bench_size']} judges) | {metadata['legal_domain']}")
 
-    # ── Step 3: chunk ─────────────────────────────────────────
     chunks = chunk_text(text)
     print(f"  ✓ Split into {len(chunks)} chunks")
 
-    # ── Step 4: embed via Jina ────────────────────────────────
-    print(f"  ⏳ Embedding {len(chunks)} chunks via Jina...")
+    print(f"  ⏳ Embedding via Gemini (batch={BATCH_SIZE})...")
     vectors = embed_texts(chunks)
-    print(f"  ✓ Got {len(vectors)} vectors (dim={len(vectors[0])})")
+    print(f"  ✓ {len(vectors)} vectors (dim={len(vectors[0])})")
 
-    # ── Step 5: store vectors + metadata in ChromaDB ──────────
-    # Every chunk of this document gets the same metadata dict.
-    # This is how ChromaDB's where-clause filtering works —
-    # metadata is stored per chunk, not per document.
-    doc_id    = filename.replace(".pdf", "").replace(".PDF", "").replace(" ", "_")
+    doc_id    = filename.replace(".pdf","").replace(".PDF","").replace(" ","_")
     ids       = [f"{doc_id}__chunk_{i}" for i in range(len(chunks))]
-    metadatas = [metadata.copy() for _ in chunks]   # same dict, one copy per chunk
+    metadatas = [metadata.copy() for _ in chunks]
 
     collection.add(
         documents  = chunks,
         embeddings = vectors,
         ids        = ids,
-        metadatas  = metadatas,    # ← the only new argument vs V1
+        metadatas  = metadatas,
     )
     print(f"  ✓ Stored — collection total: {collection.count()} chunks")
     return len(chunks)
 
 
-# ── Run all PDFs ──────────────────────────────────────────────
 def run_ingestion():
     collection = get_collection()
     pdf_files  = [f for f in os.listdir(PDF_DIR) if f.lower().endswith(".pdf")]
 
     if not pdf_files:
-        print("No PDFs found in data/cases/ — add PDFs and re-run.")
+        print("No PDFs found in data/cases/")
         return
 
     print(f"Found {len(pdf_files)} PDF(s)...\n")
     total = 0
 
     for filename in pdf_files:
-        path      = os.path.join(PDF_DIR, filename)
-        doc_id    = filename.replace(".pdf", "").replace(".PDF", "").replace(" ", "_")
-        first_id  = f"{doc_id}__chunk_0"
-        existing  = collection.get(ids=[first_id])
+        path     = os.path.join(PDF_DIR, filename)
+        doc_id   = filename.replace(".pdf","").replace(".PDF","").replace(" ","_")
+        first_id = f"{doc_id}__chunk_0"
 
-        if existing["ids"]:
+        if collection.get(ids=[first_id])["ids"]:
             print(f"  ⏭  Skipping {filename} (already indexed)")
             continue
 
         total += ingest_pdf(path, collection)
 
-    print(f"\n✅ Done. Total chunks in index: {collection.count()}")
+    print(f"\n✅ Done. Total chunks: {collection.count()}")
 
 
 if __name__ == "__main__":

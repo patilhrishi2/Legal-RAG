@@ -1,58 +1,59 @@
 # src/metadata.py
-# ─────────────────────────────────────────────────────────────
-# METADATA EXTRACTION
-# Sends the first ~3000 words of a legal judgment to
-# Groq (Llama 3.3 70B) and gets back structured metadata as JSON.
-#
-# Called once per document during ingestion — NOT per chunk.
-# The same metadata dict is attached to every chunk of that document.
-# ─────────────────────────────────────────────────────────────
 
 import os
-import json
 import re
+import json
 from groq import Groq
 from dotenv import load_dotenv
 
 load_dotenv()
 groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
-MODEL = "llama-3.3-70b-versatile"
+MODEL             = "llama-3.3-70b-versatile"
+HEADER_WORD_COUNT = 5000
 
-# How many words from the start of the document to send.
-# The header, bench details, citations, and opening summary
-# of every SC judgment appear in the first 2000–3000 words.
-# No need to send the full document — saves tokens and is faster.
-HEADER_WORD_COUNT = 3000
+SYSTEM_PROMPT = """You are a legal metadata extractor for Supreme Court of India judgments.
+Return ONLY a valid JSON object. No markdown, no explanation, no code fences.
+Use "Unknown" for unknown strings, 0 for unknown integers.
+All values must be strings or integers only — no lists, no arrays, no nested objects.
+Join multiple items with ", ".
 
+BENCH TYPE CLASSIFICATION — follow this decision tree exactly:
 
-SYSTEM_PROMPT = """You are a legal metadata extractor specializing in Supreme Court of India judgments.
+Step 1: Count the number of judges in the Bench field.
+Step 2: Check if the case involves a constitutional question.
+        A constitutional question means: validity of a law under the Constitution,
+        interpretation of Fundamental Rights (Part III), or interpretation of
+        constitutional provisions. Look for words like "constitutional validity",
+        "void under the Constitution", "infringes fundamental rights", "Article 32".
+Step 3: Apply the rule:
+        - 1 judge                          → "Single Bench"
+        - 2 judges                         → "Division Bench"
+        - 3 or 4 judges                    → "Full Bench"
+        - 5+ judges AND constitutional question → "Constitution Bench"
+        - 5+ judges AND NO constitutional question → "Full Bench"
 
-Your job is to extract structured metadata from the provided text and return it as a single valid JSON object.
-
-Rules:
-- Return ONLY the JSON object. No explanation, no markdown, no code fences.
-- If a field cannot be determined from the text, use "Unknown" for strings and 0 for integers.
-- All values must be strings or integers — no lists, no nested objects, no arrays.
-- For key_provisions, join multiple items with ", " (comma space).
-- For legal_domain, pick the single most relevant domain.
-- Keep all string values concise (under 200 characters).
+EXAMPLES:
+  Bench: 6 judges, case challenges Preventive Detention Act under Article 22 → "Constitution Bench"
+  Bench: 5 judges, case is about agency commission in a property sale → "Full Bench"
+  Bench: 3 judges, criminal appeal → "Full Bench"
+  Bench: 2 judges, contract dispute → "Division Bench"
 """
 
-USER_PROMPT_TEMPLATE = """Extract metadata from this Supreme Court of India judgment header.
+USER_PROMPT_TEMPLATE = """Extract metadata from this Supreme Court of India judgment.
 
-Return a JSON object with exactly these fields:
+Return a JSON object with EXACTLY these fields and no others:
 {{
-  "case_name"       : "Full case name e.g. A.K. Gopalan vs State of Madras",
-  "citation"        : "Primary citation e.g. AIR 1950 SC 27 or 1950 SCR 88",
+  "case_name"       : "Full case name",
+  "citation"        : "Primary citation e.g. AIR 1950 SC 27",
   "year"            : 1950,
-  "bench_size"      : 5,
-  "bench_type"      : "Constitution Bench or Division Bench or Full Bench or Single Bench",
-  "legal_domain"    : "e.g. Constitutional Law, Criminal Law, Contract Law, Property Law, Family Law, Tax Law, Labour Law, Administrative Law",
-  "key_provisions"  : "Comma-separated statutes and articles e.g. Article 21, Article 22, IPC Section 302",
-  "outcome"         : "Petition dismissed or Appeal allowed or Petition allowed or Appeal dismissed or Partially allowed",
-  "legal_principle" : "The core legal principle established or applied in one sentence",
-  "petitioner_type" : "Individual or State or Company or Government or NGO or Unknown"
+  "bench_size"      : 6,
+  "bench_type"      : "Apply the decision tree from system prompt — Constitution Bench / Full Bench / Division Bench / Single Bench",
+  "legal_domain"    : "Pick ONE: Constitutional Law, Criminal Law, Contract Law, Property Law, Family Law, Tax Law, Labour Law, Administrative Law, Civil Law",
+  "key_provisions"  : "Comma-separated e.g. Article 21, Article 22, IPC Section 302",
+  "outcome"         : "Petition dismissed / Appeal allowed / Petition allowed / Appeal dismissed / Partially allowed",
+  "legal_principle" : "Core legal principle in one sentence",
+  "petitioner_type" : "Individual / State / Company / Government / NGO / Unknown"
 }}
 
 Judgment text:
@@ -60,26 +61,44 @@ Judgment text:
 """
 
 
+HEADER_WORD_COUNT = 5000   # increase from 3000
+
 def extract_header(full_text: str) -> str:
     """
-    Take only the first HEADER_WORD_COUNT words of the document.
-    This contains everything needed for metadata extraction.
-    Sending the full 95,000-word judgment would waste tokens and hit context limits.
+    Extract the most useful portion of the judgment for metadata extraction.
+
+    Problem with Indian Kanoon PDFs: the document header contains a large
+    CITATOR INFO block (hundreds of case references like 'F 1951 SC 157')
+    that consumes most of the word budget before the actual case content.
+
+    Fix: find where the citator block ends by looking for ACT: or HEADNOTE:
+    or JUDGMENT: markers, then take text from that point forward.
+    This ensures Groq sees the constitutional question, not just citations.
     """
+    # Markers that signal the end of the citator block
+    # and the start of meaningful case content
+    content_markers = [
+        "ACT:", "HEADNOTE:", "JUDGMENT:", "HEAD NOTE:",
+        "FACTS:", "HELD:", "The petitioner", "The appellant",
+        "This is a petition", "This appeal"
+    ]
+
+    for marker in content_markers:
+        idx = full_text.find(marker)
+        if idx != -1:
+            # Take from 500 chars before the marker (to catch any preamble)
+            # through HEADER_WORD_COUNT words from that point
+            start     = max(0, idx - 500)
+            remainder = full_text[start:]
+            words     = remainder.split()
+            return " ".join(words[:HEADER_WORD_COUNT])
+
+    # Fallback: no marker found, just take first HEADER_WORD_COUNT words
     words = full_text.split()
-    header_words = words[:HEADER_WORD_COUNT]
-    return " ".join(header_words)
+    return " ".join(words[:HEADER_WORD_COUNT])
 
 
 def parse_json_from_response(text: str) -> dict:
-    """
-    Safely parse JSON from the LLM response.
-
-    Even with clear instructions, LLMs occasionally wrap JSON in
-    markdown fences (```json ... ```) or add a preamble sentence.
-    This function handles those cases gracefully.
-    """
-    # Strip markdown code fences if present
     text = text.strip()
     text = re.sub(r"^```json\s*", "", text)
     text = re.sub(r"^```\s*",     "", text)
@@ -89,7 +108,6 @@ def parse_json_from_response(text: str) -> dict:
     try:
         return json.loads(text)
     except json.JSONDecodeError:
-        # If still failing, try to find a JSON object anywhere in the response
         match = re.search(r"\{.*\}", text, re.DOTALL)
         if match:
             try:
@@ -97,18 +115,11 @@ def parse_json_from_response(text: str) -> dict:
             except json.JSONDecodeError:
                 pass
 
-    # If all parsing fails, return a safe fallback
-    # Ingestion continues — better to have a chunk with Unknown metadata than to crash
-    print("  ⚠️  Could not parse metadata JSON — using fallback values")
+    print("  ⚠️  Could not parse metadata JSON — using fallback")
     return {}
 
 
 def get_fallback_metadata(source_file: str) -> dict:
-    """
-    Fallback metadata when extraction fails or returns empty.
-    Ensures every chunk always has a complete metadata dict.
-    ChromaDB requires consistent keys across all documents in a collection.
-    """
     return {
         "case_name"      : "Unknown",
         "citation"       : "Unknown",
@@ -125,13 +136,6 @@ def get_fallback_metadata(source_file: str) -> dict:
 
 
 def validate_and_clean(raw: dict, source_file: str) -> dict:
-    """
-    Enforce correct types and fill missing fields.
-
-    ChromaDB will reject the entire .add() call if any metadata value
-    is the wrong type (e.g. year as a string instead of int).
-    This function makes sure that never happens.
-    """
     fallback = get_fallback_metadata(source_file)
 
     def safe_str(key):
@@ -160,65 +164,45 @@ def validate_and_clean(raw: dict, source_file: str) -> dict:
 
 
 def extract_metadata(full_text: str, source_file: str) -> dict:
-    """
-    Main function — call this from ingest.py.
-
-    Takes the full document text and filename.
-    Returns a clean, validated metadata dict ready for ChromaDB.
-    """
     header = extract_header(full_text)
-
     prompt = USER_PROMPT_TEMPLATE.format(text=header)
 
     try:
         response = groq_client.chat.completions.create(
-            model       = MODEL,
-            messages    = [
+            model      = MODEL,
+            messages   = [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user",   "content": prompt}
             ],
-            temperature = 0.0,    # deterministic — we want consistent JSON, not creativity
-            max_tokens  = 512,    # metadata JSON is small; no need for more
+            temperature = 0.0,
+            max_tokens  = 512,
         )
-
         raw_text = response.choices[0].message.content
         raw_dict = parse_json_from_response(raw_text)
 
         if not raw_dict:
             return get_fallback_metadata(source_file)
 
-        cleaned = validate_and_clean(raw_dict, source_file)
-
-        return cleaned
+        return validate_and_clean(raw_dict, source_file)
 
     except Exception as e:
         print(f"  ⚠️  Metadata extraction failed: {e}")
         return get_fallback_metadata(source_file)
 
 
-# ── Quick test — run this file directly ──────────────────────
+# ── Quick test ────────────────────────────────────────────────
 if __name__ == "__main__":
     sample = """
     A.K. Gopalan vs The State Of Madras Union Of India on 19 May, 1950
     Equivalent citations: 1950 AIR 27, 1950 SCR 88
-    Author: Kania
     Bench: Kania, H.J. (CJ), Fazal Ali, Saiyid, Patanjali Sastri, M.,
            Mahajan, Mehr Chand, Das, Sudhi Ranjan, Mukherjea, B.K.
-    PETITIONER: A.K. GOPALAN
-    RESPONDENT: THE STATE OF MADRAS. UNION OF INDIA (Intervener)
-    DATE OF JUDGMENT: 19/05/1950
     ACT: Constitution of India - Articles 13, 19, 21, 22, 32;
-         Preventive Detention Act, 1950 - Sections 3, 7, 12, 14
-    HEADNOTE:
-    The petitioner, a communist leader, was detained under the Preventive
-    Detention Act, 1950. He challenged the constitutional validity of the
-    Act contending that it violated Articles 13, 19, 21 and 22 of the
-    Constitution of India...
+         Preventive Detention Act, 1950
+    HEADNOTE: The petitioner challenged the constitutional validity of the
+    Preventive Detention Act contending it violated Articles 19, 21 and 22.
     """
-
-    print("Testing metadata extraction...\n")
     result = extract_metadata(sample, "A_K_Gopalan_test.PDF")
-
-    print("Extracted metadata:")
-    for key, val in result.items():
-        print(f"  {key:<18} : {val}")
+    print("\nExtracted metadata:")
+    for k, v in result.items():
+        print(f"  {k:<18} : {v}")

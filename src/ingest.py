@@ -9,6 +9,7 @@ from google import genai
 from google.genai import types
 from dotenv import load_dotenv
 from metadata import extract_metadata
+from bm25_index import build_and_save
 
 load_dotenv()
 gemini_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
@@ -157,6 +158,13 @@ def run_ingestion():
         total += ingest_pdf(path, collection)
 
     print(f"\n✅ Done. Total chunks: {collection.count()}")
+
+    # Only rebuild BM25 if new documents were actually added
+    if total > 0:
+        print("\n🔨 Rebuilding BM25 index...")
+        build_and_save()
+    else:
+        print("\n ℹ️  No new documents — BM25 index unchanged.")
 
 
 if __name__ == "__main__":

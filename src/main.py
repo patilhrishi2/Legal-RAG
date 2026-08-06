@@ -24,7 +24,7 @@ def status():
             "status"      : "ok",
             "total_chunks": collection.count(),
             "collection"  : "legal_cases",
-            "version"     : "V2"
+            "version"     : "V3"
         })
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
@@ -157,7 +157,7 @@ def ingest():
 
 # ── Run ───────────────────────────────────────────────────────
 if __name__ == "__main__":
-    print("\n🏛  Legal RAG — V2")
+    print("\n🏛  Legal RAG — V3")
     print("   GET  http://localhost:5000/status")
     print("   GET  http://localhost:5000/cases")
     print("   POST http://localhost:5000/search")

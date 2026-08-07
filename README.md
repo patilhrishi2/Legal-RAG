@@ -209,6 +209,109 @@ POST /search response now also includes per result:
 
 ---
 
+## V4 - Citation-Aware RAG Generation
+
+### What it does
+Adds a generation layer on top of V3 hybrid retrieval. When the user sets
+"generate": true in their request, the retrieved chunks are passed to
+Gemini 3.5 Flash with a grounded prompt. The model produces a structured
+natural language answer with inline citations, key legal principles, and
+a confidence assessment. Raw chunks are always returned alongside the
+generated answer so every claim can be verified against the source.
+
+### New features
+- **generator.py** - new file, assembles context, builds grounded prompt,
+  calls Gemini 3.5 Flash, parses structured response
+- **Grounded generation** - LLM is explicitly forbidden from using its own
+  training knowledge. Only the retrieved chunks are allowed as source of truth
+- **Inline citations** - every factual claim in the answer is tagged with
+  (Case Name, Citation) so it is traceable to a source document
+- **Structured output** - response always follows: ANSWER / KEY LEGAL
+  PRINCIPLES / SOURCES USED / CONFIDENCE
+- **Hallucination refusal** - when retrieved chunks do not contain the answer,
+  the model says so explicitly rather than generating a confident wrong answer
+- **Confidence scoring** - HIGH / MEDIUM / LOW based on how well the
+  retrieved chunks support the answer
+- **Opt-in generation** - "generate": false (default) returns V3 behaviour
+  unchanged. Generation only runs when explicitly requested, preserving
+  backward compatibility and avoiding unnecessary latency
+
+### Key concepts learned
+- **Grounded generation:** constraining an LLM to a specific context window
+  prevents it from mixing retrieved evidence with training knowledge
+- **Context assembly:** numbering chunks as [EXCERPT 1], [EXCERPT 2] gives
+  the model a stable reference system for citation
+- **Prompt engineering for RAG:** system prompt must explicitly forbid
+  knowledge outside the context, require citations on every claim, and
+  define the exact output structure
+- **Hallucination detection via refusal:** a well-prompted model will say
+  "the documents do not contain this information" rather than fabricating
+  an answer — test this deliberately with out-of-scope queries
+- **Temperature for generation:** 0.1 (not 0.0) — zero is too rigid and
+  can cause the model to refuse to synthesise; 0.1 allows natural phrasing
+  while keeping answers grounded
+- **Token budget:** 1500 tokens truncated the answer mid-sentence; 3000
+  tokens is the safe minimum for detailed legal answers
+- **Lost in the middle:** LLMs attend better to context placed before the
+  question than after — context block always precedes the query in the prompt
+- **Parse defensively:** LLMs occasionally deviate from output structure
+  instructions; the parser must handle missing sections without crashing
+
+### How generation fits into the pipeline
+
+query
+- hybrid retrieval (V3, unchanged)
+- top-k chunks with scores and metadata
+- context assembly (numbered excerpts)
+- grounded prompt + system instruction
+- Gemini 3.5 Flash
+- structured answer with citations
+
+### Hallucination test results
+Query: "What did the Supreme Court rule about right to privacy in 2017?"
+Index contains only 1950 cases. Expected behaviour: refusal.
+Actual behaviour: answer = "The retrieved documents do not contain
+sufficient information to answer this question." confidence = LOW.
+No 2017 case law fabricated. Grounding is working correctly.
+
+### API changes
+
+POST /search request — new optional field:
+"generate": true <- triggers generation (default: false)
+
+POST /search response — new field when generate=true:
+"generated": {
+"answer" : "grounded answer with inline citations",
+"key_legal_principles" : "bullet points with citations",
+"sources_used" : "numbered list of cited cases",
+"confidence" : "HIGH / MEDIUM / LOW",
+"sources" : [ structured list of chunks used as context ],
+"error" : null
+}
+
+When generate=false:
+"generated": null <- field present but null, V3 behaviour preserved
+
+### Problems encountered and fixed
+- max_output_tokens=1500 truncated answers mid-sentence -> increased to 3000
+- parse_response() missed sections when model omitted colons or varied
+  capitalisation -> switched from startswith() to case-insensitive contains
+  matching with colon index detection
+- 503 UNAVAILABLE from Gemini during high demand -> wrapped in try/except,
+  error surfaced in generated.error field without crashing the response
+- KEY LEGAL PRINCIPLES populated even for out-of-scope queries -> acceptable
+  behaviour; critical thing is ANSWER section correctly refuses
+
+### Limitations that motivate V5
+- Legal arguments and reasoning patterns are not explicitly extracted —
+  the answer synthesises but does not identify which party made which argument
+- All retrieved chunks treated equally — no distinction between majority
+  opinion, dissenting opinion, and headnote sections of a judgment
+- Single-pass generation — no verification step to check whether the
+  generated answer is actually supported by the cited chunks
+- No structured extraction of case outcome, winning arguments, or the
+  specific legal test applied
+
 ## Roadmap
 
 | Version | Focus | Status |
@@ -216,8 +319,8 @@ POST /search response now also includes per result:
 | V1 | Basic retrieval - embeddings, chunking, vector search | Done |
 | V2 | Metadata - extraction, filtering, structured search | Done |
 | V3 | Hybrid search - BM25 + vector + RRF fusion | Done |
-| V4 | Citation-aware generation - grounded LLM answers | Next |
-| V5 | Legal argument extraction - structured reasoning | Planned |
+| V4 | Citation-aware generation - grounded LLM answers | Done |
+| V5 | Legal argument extraction - structured reasoning | Next |
 | V6 | Re-ranking - cross-encoder for precision | Planned |
 | V7 | Contradiction detection - conflicting judgments | Planned |
 | V8 | Legal strategy intelligence - synthesis | Planned |

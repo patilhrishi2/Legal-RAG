@@ -6,7 +6,7 @@
 #   1. Takes retrieved chunks from retriever.py (V3 output)
 #   2. Assembles them into a numbered context block
 #   3. Builds a grounded prompt with strict citation instructions
-#   4. Calls Gemini 2.5 Flash for generation
+#   4. Calls Gemini 3.5 Flash for generation
 #   5. Returns structured response with answer + sources used
 #
 # Key principle: the LLM is ONLY allowed to use the retrieved

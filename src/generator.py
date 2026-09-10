@@ -1,19 +1,5 @@
 # src/generator.py
-# ─────────────────────────────────────────────────────────────
-# V4 GENERATION PIPELINE
-#
-# What this file does:
-#   1. Takes retrieved chunks from retriever.py (V3 output)
-#   2. Assembles them into a numbered context block
-#   3. Builds a grounded prompt with strict citation instructions
-#   4. Calls Gemini 3.5 Flash for generation
-#   5. Returns structured response with answer + sources used
-#
-# Key principle: the LLM is ONLY allowed to use the retrieved
-# chunks as its source of truth. It cannot draw on its own
-# training knowledge. This is what "grounded generation" means
-# and it is the primary defence against hallucination in RAG.
-# ─────────────────────────────────────────────────────────────
+# V5 — context assembly now uses structured extraction when available
 
 import os
 from google import genai
@@ -24,18 +10,8 @@ load_dotenv()
 gemini_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
 GENERATION_MODEL = "gemini-3.5-flash"
-
-# Maximum chunks to include in context.
-# More chunks = more context = better coverage but:
-#   (a) longer prompts cost more tokens
-#   (b) LLMs lose focus on very long contexts ("lost in the middle" problem)
-# 5 is the standard starting point for RAG generation.
 MAX_CONTEXT_CHUNKS = 5
 
-
-# ── System prompt ─────────────────────────────────────────────
-# This is sent once as the system instruction.
-# It establishes the model's role and hard constraints.
 SYSTEM_PROMPT = """You are a legal research assistant specialising in Supreme Court of India judgments.
 
 Your job is to answer legal questions based EXCLUSIVELY on the case excerpts provided to you.
@@ -64,30 +40,23 @@ CONFIDENCE:
 """
 
 
-# ── Build numbered context block ──────────────────────────────
-def build_context(chunks: list[dict]) -> tuple[str, list[dict]]:
+# ── Build context from raw chunks (V4 behaviour) ──────────────
+def build_raw_context(chunks: list[dict]) -> tuple[str, list[dict]]:
     """
-    Format retrieved chunks into a numbered context block for the LLM.
-
-    WHY NUMBERING?
-    The LLM needs a stable reference system to cite specific chunks.
-    "As stated in excerpt [3]..." is more reliable than asking the model
-    to memorise and reproduce case names correctly mid-generation.
-
-    Returns:
-        context_text : the formatted string sent to the LLM
-        sources      : list of source dicts (for the API response)
+    Format retrieved chunks as numbered excerpts.
+    Used when extraction is not requested (generate=true, extract=false).
+    Identical to V4 build_context().
     """
     context_parts = []
     sources       = []
 
     for i, chunk in enumerate(chunks[:MAX_CONTEXT_CHUNKS], 1):
-        case_name  = chunk.get("case_name",  "Unknown Case")
-        citation   = chunk.get("citation",   "Unknown Citation")
-        year       = chunk.get("year",       "Unknown Year")
-        domain     = chunk.get("legal_domain", "Unknown Domain")
-        chunk_num  = chunk.get("chunk_num",  -1)
-        text       = chunk.get("text",       "")
+        case_name = chunk.get("case_name",    "Unknown Case")
+        citation  = chunk.get("citation",     "Unknown Citation")
+        year      = chunk.get("year",         "Unknown Year")
+        domain    = chunk.get("legal_domain", "Unknown Domain")
+        chunk_num = chunk.get("chunk_num",    -1)
+        text      = chunk.get("text",         "")
 
         context_parts.append(
             f"[EXCERPT {i}]\n"
@@ -99,16 +68,87 @@ def build_context(chunks: list[dict]) -> tuple[str, list[dict]]:
         )
 
         sources.append({
-            "excerpt_num" : i,
-            "case_name"   : case_name,
-            "citation"    : citation,
-            "year"        : year,
-            "chunk_num"   : chunk_num,
-            "score"       : chunk.get("score", 0),
-            "in_both"     : chunk.get("in_both", False),
+            "excerpt_num": i,
+            "case_name"  : case_name,
+            "citation"   : citation,
+            "year"       : year,
+            "chunk_num"  : chunk_num,
+            "score"      : chunk.get("score",   0),
+            "in_both"    : chunk.get("in_both", False),
         })
 
-    context_text = "\n" + ("─" * 60) + "\n"
+    context_text  = "\n" + ("─" * 60) + "\n"
+    context_text += "\n\n".join(context_parts)
+    context_text += "\n" + ("─" * 60)
+
+    return context_text, sources
+
+
+# ── Build context from structured extraction (V5 behaviour) ───
+def build_structured_context(chunks: list[dict]) -> tuple[str, list[dict]]:
+    """
+    Format enriched chunks (with extraction dicts) into a structured
+    context block that separates argument types.
+
+    WHY THIS IS BETTER THAN RAW CONTEXT:
+    Raw context gives the LLM 400 words of mixed content per chunk.
+    Structured context gives it labelled sections — petitioner argued X,
+    court held Y, principle established Z. The model can then answer
+    argument-specific queries precisely rather than scanning raw text.
+
+    Only includes non-empty extraction fields to keep context tight.
+    """
+    context_parts = []
+    sources       = []
+
+    for i, chunk in enumerate(chunks[:MAX_CONTEXT_CHUNKS], 1):
+        case_name = chunk.get("case_name",    "Unknown Case")
+        citation  = chunk.get("citation",     "Unknown Citation")
+        year      = chunk.get("year",         "Unknown Year")
+        chunk_num = chunk.get("chunk_num",    -1)
+        ext       = chunk.get("extraction",   {})
+
+        # Build structured section — only include non-empty fields
+        section = (
+            f"[EXCERPT {i}]\n"
+            f"Case     : {case_name}\n"
+            f"Citation : {citation}\n"
+            f"Year     : {year}\n"
+        )
+
+        field_labels = [
+            ("petitioner_arguments", "Petitioner argued"),
+            ("respondent_arguments", "Respondent argued"),
+            ("court_reasoning",      "Court reasoning"),
+            ("legal_principles",     "Legal principles"),
+            ("decision",             "Decision/Holding"),
+            ("key_facts",            "Key facts"),
+        ]
+
+        has_extraction = False
+        for field, label in field_labels:
+            val = ext.get(field, "").strip()
+            if val:
+                section += f"{label}: {val}\n"
+                has_extraction = True
+
+        # If extraction is empty for this chunk, fall back to raw text
+        if not has_extraction:
+            section += f"Text:\n{chunk.get('text', '')}\n"
+
+        context_parts.append(section)
+        sources.append({
+            "excerpt_num"          : i,
+            "case_name"            : case_name,
+            "citation"             : citation,
+            "year"                 : year,
+            "chunk_num"            : chunk_num,
+            "score"                : chunk.get("score",   0),
+            "in_both"              : chunk.get("in_both", False),
+            "extraction_available" : has_extraction,
+        })
+
+    context_text  = "\n" + ("─" * 60) + "\n"
     context_text += "\n\n".join(context_parts)
     context_text += "\n" + ("─" * 60)
 
@@ -116,35 +156,25 @@ def build_context(chunks: list[dict]) -> tuple[str, list[dict]]:
 
 
 # ── Build user prompt ─────────────────────────────────────────
-def build_prompt(query: str, context: str) -> str:
-    """
-    Assemble the full user-turn prompt.
-
-    Structure:
-      1. The retrieved excerpts (context)
-      2. The user's question
-      3. Reminder of citation format
-
-    WHY PUT CONTEXT BEFORE QUESTION?
-    Research shows LLMs attend better to context placed before
-    the question than after. With long contexts, placing the
-    question last also makes the instruction immediately visible
-    right before the model starts generating.
-    """
-    return f"""Below are excerpts from Supreme Court of India judgments retrieved for your question.
-Use ONLY these excerpts to answer. Do not use any other knowledge.
-
-RETRIEVED EXCERPTS:
-{context}
-
-QUESTION:
-{query}
-
-Remember: cite every claim as (Case Name, Citation). If the answer is not in the excerpts, say so explicitly.
-"""
+def build_prompt(query: str, context: str, structured: bool = False) -> str:
+    mode_note = (
+        "The excerpts below have been pre-analysed and broken into "
+        "labelled components (petitioner arguments, court reasoning, etc.). "
+        "Use these labels to give a precise, argument-aware answer.\n\n"
+        if structured else ""
+    )
+    return (
+        f"{mode_note}"
+        f"Below are excerpts from Supreme Court of India judgments retrieved for your question.\n"
+        f"Use ONLY these excerpts to answer. Do not use any other knowledge.\n\n"
+        f"RETRIEVED EXCERPTS:\n{context}\n\n"
+        f"QUESTION:\n{query}\n\n"
+        f"Remember: cite every claim as (Case Name, Citation). "
+        f"If the answer is not in the excerpts, say so explicitly."
+    )
 
 
-# ── Parse generated response ──────────────────────────────────
+# ── Parse response (unchanged from V4) ───────────────────────
 def parse_response(raw_text: str) -> dict:
     sections = {
         "answer"              : "",
@@ -158,8 +188,6 @@ def parse_response(raw_text: str) -> dict:
     lines           = raw_text.split("\n")
     buffer          = []
 
-    # More flexible matching — check if line CONTAINS the header
-    # rather than startswith, handles slight variations
     section_map = {
         "ANSWER"              : "answer",
         "KEY LEGAL PRINCIPLES": "key_legal_principles",
@@ -169,17 +197,16 @@ def parse_response(raw_text: str) -> dict:
 
     for line in lines:
         stripped = line.strip().upper()
+        matched  = False
 
-        matched = False
         for header, key in section_map.items():
             if stripped.startswith(header):
                 if current_section:
                     sections[current_section] = "\n".join(buffer).strip()
                 current_section = key
-                buffer = []
-                # grab anything after the header and colon on the same line
-                original = line.strip()
-                colon_idx = original.find(":")
+                buffer          = []
+                original        = line.strip()
+                colon_idx       = original.find(":")
                 if colon_idx != -1:
                     inline = original[colon_idx + 1:].strip()
                     if inline:
@@ -199,30 +226,34 @@ def parse_response(raw_text: str) -> dict:
             sections["confidence"] = level
             break
 
+        # Fallback: if confidence still UNKNOWN, infer from answer content
+    if sections["confidence"] == "UNKNOWN":
+        answer_lower = sections["answer"].lower()
+        if "do not contain sufficient information" in answer_lower:
+            sections["confidence"] = "LOW"
+        elif sections["answer"] and len(sections["answer"]) > 200:
+            sections["confidence"] = "MEDIUM"
+        else:
+            sections["confidence"] = "LOW"
+
     return sections
 
 
+
 # ── Main generation function ──────────────────────────────────
-def generate_answer(query: str, chunks: list[dict]) -> dict:
+def generate_answer(query: str, chunks: list[dict],
+                    use_extraction: bool = False) -> dict:
     """
-    Full generation pipeline — call this from main.py.
+    Generate a grounded answer from retrieved chunks.
 
-    Takes:
-        query  : the user's original question
-        chunks : list of retrieved chunk dicts from retriever.search()
-
-    Returns a dict with:
-        answer               : grounded natural language answer
-        key_legal_principles : bullet points of principles found
-        sources_used         : text list of cited cases
-        confidence           : HIGH / MEDIUM / LOW
-        sources              : structured list of chunks used as context
-        full_response        : raw LLM output (for debugging)
-        error                : set if generation failed
+    use_extraction=False  →  V4 behaviour, raw chunk text as context
+    use_extraction=True   →  V5 behaviour, structured extraction as context
+                             (chunks must already have "extraction" key
+                              added by extractor.extract_chunks())
     """
     if not chunks:
         return {
-            "answer"               : "No relevant documents were retrieved for this query.",
+            "answer"               : "No relevant documents were retrieved.",
             "key_legal_principles" : "",
             "sources_used"         : "",
             "confidence"           : "LOW",
@@ -231,9 +262,13 @@ def generate_answer(query: str, chunks: list[dict]) -> dict:
             "error"                : None,
         }
 
-    # Build context and prompt
-    context, sources = build_context(chunks)
-    prompt           = build_prompt(query, context)
+    # Choose context builder based on whether extraction was run
+    if use_extraction:
+        context, sources = build_structured_context(chunks)
+    else:
+        context, sources = build_raw_context(chunks)
+
+    prompt = build_prompt(query, context, structured=use_extraction)
 
     try:
         response = gemini_client.models.generate_content(
@@ -246,11 +281,8 @@ def generate_answer(query: str, chunks: list[dict]) -> dict:
             ],
             config = types.GenerateContentConfig(
                 system_instruction = SYSTEM_PROMPT,
-                temperature        = 0.1,   # low but not zero
-                                            # zero = too rigid, may refuse to synthesise
-                                            # 0.1 = slight flexibility for natural phrasing
-                                            # while keeping answers grounded
-                max_output_tokens  = 3000,  # enough for a detailed legal answer
+                temperature        = 0.1,
+                max_output_tokens  = 3000,
             )
         )
 
@@ -265,6 +297,7 @@ def generate_answer(query: str, chunks: list[dict]) -> dict:
             "sources"              : sources,
             "full_response"        : parsed["full_response"],
             "error"                : None,
+            "extraction_used"      : use_extraction,
         }
 
     except Exception as e:
@@ -276,6 +309,7 @@ def generate_answer(query: str, chunks: list[dict]) -> dict:
             "sources"              : sources,
             "full_response"        : "",
             "error"                : str(e),
+            "extraction_used"      : use_extraction,
         }
 
 
@@ -284,33 +318,23 @@ if __name__ == "__main__":
     import sys
     sys.path.insert(0, os.path.dirname(__file__))
     from retriever import search
+    from extractor import extract_chunks
 
-    test_queries = [
-        # Test 1 — answer clearly in the index
-        "What are the constitutional limits on preventive detention?",
+    query  = "What arguments did the petitioner make about fundamental rights and preventive detention?"
+    chunks = search(query, top_k=3)
 
-        # Test 2 — answer NOT in the index (hallucination test)
-        # Your index only has 1950 cases — this should trigger the refusal
-        "What did the Supreme Court rule about right to privacy in 2017?",
-    ]
+    print(f"\n{'═'*65}")
+    print("MODE: V4 (raw chunks, no extraction)")
+    print(f"{'═'*65}")
+    result = generate_answer(query, chunks, use_extraction=False)
+    print(f"\nANSWER:\n{result['answer']}")
+    print(f"\nCONFIDENCE: {result['confidence']}")
 
-    for query in test_queries:
-        print(f"\n{'═'*65}")
-        print(f"QUERY: {query}")
-        print(f"{'═'*65}")
-
-        chunks = search(query, top_k=5)
-        result = generate_answer(query, chunks)
-
-        if result["error"]:
-            print(f"ERROR: {result['error']}")
-            continue
-
-        print(f"\nANSWER:\n{result['answer']}")
-        print(f"\nKEY LEGAL PRINCIPLES:\n{result['key_legal_principles']}")
-        print(f"\nSOURCES USED:\n{result['sources_used']}")
-        print(f"\nCONFIDENCE: {result['confidence']}")
-        print(f"\nCHUNKS USED AS CONTEXT:")
-        for s in result["sources"]:
-            both = "both pipelines" if s["in_both"] else "one pipeline"
-            print(f"  [{s['excerpt_num']}] {s['case_name']} | {s['citation']} | chunk #{s['chunk_num']} | score={s['score']:.5f} | {both}")
+    print(f"\n{'═'*65}")
+    print("MODE: V5 (structured extraction)")
+    print(f"{'═'*65}")
+    enriched = extract_chunks(chunks)
+    result   = generate_answer(query, enriched, use_extraction=True)
+    print(f"\nANSWER:\n{result['answer']}")
+    print(f"\nKEY LEGAL PRINCIPLES:\n{result['key_legal_principles']}")
+    print(f"\nCONFIDENCE: {result['confidence']}")

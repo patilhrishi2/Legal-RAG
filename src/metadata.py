@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 load_dotenv()
 groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
-MODEL             = "llama-3.3-70b-versatile"
+MODEL = "qwen/qwen3.6-27b"
 HEADER_WORD_COUNT = 5000
 
 SYSTEM_PROMPT = """You are a legal metadata extractor for Supreme Court of India judgments.
@@ -176,6 +176,7 @@ def extract_metadata(full_text: str, source_file: str) -> dict:
             ],
             temperature = 0.0,
             max_tokens  = 512,
+            reasoning_effort = "none",
         )
         raw_text = response.choices[0].message.content
         raw_dict = parse_json_from_response(raw_text)

@@ -1,5 +1,5 @@
 # src/main.py
-# V4 — adds optional generation to /search endpoint
+# V5 — adds optional extraction flag
 
 import os
 import sys
@@ -9,9 +9,10 @@ from dotenv import load_dotenv
 load_dotenv()
 sys.path.insert(0, os.path.dirname(__file__))
 
-from retriever  import search, list_cases
-from ingest     import run_ingestion, get_collection
-from generator  import generate_answer
+from retriever import search, list_cases
+from ingest    import run_ingestion, get_collection
+from generator import generate_answer
+from extractor import extract_chunks
 
 app = Flask(__name__)
 
@@ -25,7 +26,7 @@ def status():
             "status"      : "ok",
             "total_chunks": collection.count(),
             "collection"  : "legal_cases",
-            "version"     : "V4"
+            "version"     : "V5"
         })
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
@@ -60,26 +61,23 @@ def cases():
 @app.route("/search", methods=["POST"])
 def search_cases():
     """
-    Hybrid search with optional generation.
+    Hybrid search with optional extraction and generation.
 
     Request body:
     {
-        "query"    : "What are the limits on preventive detention?",
+        "query"    : "What arguments did petitioners make about Article 22?",
         "top_k"    : 5,
         "filters"  : { "legal_domain": "Constitutional Law" },
-        "generate" : true
+        "extract"  : true,    <- NEW in V5: run argument extraction on chunks
+        "generate" : true     <- V4: generate grounded answer
     }
 
-    "generate" is optional and defaults to false.
-    When false  → behaviour identical to V3, raw chunks only.
-    When true   → chunks passed to Gemini, structured answer returned.
-
-    WHY OPTIONAL?
-    Generation costs tokens and adds ~2-3 seconds of latency.
-    Not every use case needs a generated answer — sometimes
-    the user just wants to browse relevant chunks. Keeping
-    generation opt-in preserves V3 behaviour by default and
-    lets the frontend decide when to pay the latency cost.
+    Flag combinations:
+      extract=false, generate=false  ->  V3 behaviour, raw chunks only
+      extract=false, generate=true   ->  V4 behaviour, raw generation
+      extract=true,  generate=false  ->  V5 only extraction, no generation
+      extract=true,  generate=true   ->  V5 full: extract then generate
+                                         using structured context
     """
     data = request.get_json()
 
@@ -88,24 +86,32 @@ def search_cases():
 
     query    = data["query"].strip()
     top_k    = int(data.get("top_k", 5))
-    filters  = data.get("filters", {})
-    generate = data.get("generate", False)   # ← new in V4
+    filters  = data.get("filters",  {})
+    extract  = data.get("extract",  False)   # ← new in V5
+    generate = data.get("generate", False)
 
     if not query:
         return jsonify({"error": "'query' cannot be empty"}), 400
     if not 1 <= top_k <= 20:
         return jsonify({"error": "'top_k' must be between 1 and 20"}), 400
 
-    # ── Retrieval (identical to V3) ───────────────────────────
+    # ── Step 1: Retrieval (V3 hybrid search) ─────────────────
     try:
         chunks = search(query, top_k=top_k, filters=filters)
     except Exception as e:
         return jsonify({"error": f"Retrieval failed: {str(e)}"}), 500
 
-    # ── Format retrieved chunks ───────────────────────────────
+    # ── Step 2: Extraction (new in V5) ───────────────────────
+    if extract:
+        try:
+            chunks = extract_chunks(chunks)
+        except Exception as e:
+            return jsonify({"error": f"Extraction failed: {str(e)}"}), 500
+
+    # ── Step 3: Format chunks for response ───────────────────
     formatted_chunks = []
     for i, r in enumerate(chunks, 1):
-        formatted_chunks.append({
+        chunk_entry = {
             "rank"            : i,
             "score"           : r["score"],
             "semantic_score"  : r["semantic_score"],
@@ -124,34 +130,41 @@ def search_cases():
             "legal_principle" : r["legal_principle"],
             "petitioner_type" : r["petitioner_type"],
             "source_file"     : r["source_file"],
-        })
+        }
+        # Include extraction if it was run
+        if extract and "extraction" in r:
+            chunk_entry["extraction"] = r["extraction"]
 
-    # ── Base response (V3 compatible) ─────────────────────────
+        formatted_chunks.append(chunk_entry)
+
+    # ── Step 4: Generation (V4/V5) ────────────────────────────
     response = {
         "query"          : query,
         "filters_applied": filters,
+        "extract_used"   : extract,
         "count"          : len(formatted_chunks),
         "results"        : formatted_chunks,
-        "generated"      : None,   # null when generate=false
+        "generated"      : None,
     }
 
-    # ── Generation (new in V4) ────────────────────────────────
     if generate:
         try:
-            gen_result = generate_answer(query, chunks)
+            gen_result = generate_answer(
+                query,
+                chunks,
+                use_extraction = extract   # pass structured chunks if extracted
+            )
             response["generated"] = {
                 "answer"               : gen_result["answer"],
                 "key_legal_principles" : gen_result["key_legal_principles"],
                 "sources_used"         : gen_result["sources_used"],
                 "confidence"           : gen_result["confidence"],
                 "sources"              : gen_result["sources"],
+                "extraction_used"      : gen_result.get("extraction_used", False),
                 "error"                : gen_result["error"],
             }
         except Exception as e:
-            response["generated"] = {
-                "answer" : "",
-                "error"  : str(e),
-            }
+            response["generated"] = {"answer": "", "error": str(e)}
 
     return jsonify(response)
 
@@ -172,7 +185,7 @@ def ingest():
 
 # ── Run ───────────────────────────────────────────────────────
 if __name__ == "__main__":
-    print("\n🏛  Legal RAG — V4")
+    print("\n🏛  Legal RAG — V5")
     print("   GET  http://localhost:5000/status")
     print("   GET  http://localhost:5000/cases")
     print("   POST http://localhost:5000/search")

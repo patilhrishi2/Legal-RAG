@@ -4,7 +4,7 @@ A Retrieval-Augmented Generation (RAG) system for analysing Supreme Court of Ind
 judgments (1950-2024). Built as a progressive learning project — each version
 introduces new RAG concepts on top of the previous one.
 
-**Stack:** Python · Flask · ChromaDB · Gemini Embedding API · Gemini 2.5 Flash · Groq (Llama 3.3 70B) · pdfplumber · rank_bm25
+**Stack:** Python · Flask · ChromaDB · Gemini Embedding API · Gemini 3.5 Flash · Groq (Qwen 3.6 27B) · pdfplumber · rank_bm25
 
 ---
 
@@ -312,6 +312,126 @@ When generate=false:
 - No structured extraction of case outcome, winning arguments, or the
   specific legal test applied
 
+## V5 - Legal Argument Extraction
+
+### What it does
+Adds a structured extraction layer between retrieval and generation.
+Before the LLM generates an answer, each retrieved chunk is sent to
+Qwen 3.6 27B on Groq to identify and label the specific legal components
+present in it — petitioner arguments, respondent arguments, court
+reasoning, legal principles, decision, and key facts. The generator then
+receives structured chunks rather than raw text, producing answers that
+are precisely argument-aware rather than undifferentiated summaries.
+
+### New features
+- **extractor.py** - new file, sends each retrieved chunk to Groq and
+  gets back a six-field structured extraction dict
+- **Structured context assembly** - generator.py gains a second context
+  builder that formats labelled components instead of raw text
+- **Argument-specific generation** - when extract=true, the prompt tells
+  Gemini which text is a petitioner argument vs court reasoning vs holding
+- **Aggregated summary** - summarise_extractions() collects all non-empty
+  values of each component type across all chunks into a consolidated view
+- **Groq model migration** - llama-3.3-70b-versatile deprecated June 2026,
+  migrated to qwen/qwen3.6-27b across metadata.py and extractor.py
+- **Four flag combinations** - extract and generate are independently
+  opt-in, enabling V3/V4/V5-extract-only/V5-full modes from one endpoint
+
+### The six extracted components
+| Field | What it captures |
+|---|---|
+| petitioner_arguments | Claims made by the party who brought the case |
+| respondent_arguments | Counter-arguments made by the opposing party or state |
+| court_reasoning | The judges' own analysis and interpretation |
+| legal_principles | Specific legal rules or tests stated or applied |
+| decision | What the court actually held in this passage |
+| key_facts | Factual background relevant to the legal question |
+
+### Key concepts learned
+- **Information retrieval vs information extraction:** retrieval finds
+  relevant chunks; extraction finds relevant structures within those chunks
+- **Query-time vs index-time extraction:** extraction runs on retrieved
+  chunks at search time, not during ingestion. This lets you iterate on
+  the extraction prompt without re-indexing the entire dataset. The
+  tradeoff is cost paid per query instead of per document
+- **Structured context improves generation precision:** labelling text
+  as "Petitioner argued" vs "Court held" lets the generator answer
+  argument-specific queries without mixing argument types
+- **Single chunk rarely contains all six components:** most chunks have
+  two or three populated fields. Force-filling empty fields degrades
+  extraction quality — the prompt explicitly instructs the model to use
+  empty string when a component is genuinely absent
+- **Enrichment pattern:** extraction adds an "extraction" key to each
+  chunk dict rather than replacing anything. Downstream code can use
+  raw text, metadata, or structured extraction depending on need
+- **Model migration is a production reality:** llama-3.3-70b-versatile
+  deprecated without warning. reasoning_effort="none" on Qwen models
+  disables thinking mode for structured JSON tasks — reduces latency
+  and token usage without affecting extraction quality
+
+### How extraction fits into the pipeline
+
+query
+→ hybrid retrieval (V3, unchanged)
+→ top-k chunks
+→ extract_chunks() — Groq call per chunk
+→ enriched chunks with "extraction" key
+→ build_structured_context()
+→ Gemini generation
+→ argument-aware cited answer
+
+
+### Flag combinations on POST /search
+
+extract=false, generate=false -> V3: raw chunks only
+extract=false, generate=true -> V4: raw generation
+extract=true, generate=false -> V5: structured chunks, no generation
+extract=true, generate=true -> V5 full: extract then generate
+
+
+### API changes
+
+POST /search request — new optional field:
+"extract": true <- triggers argument extraction (default: false)
+
+POST /search response:
+"extract_used": true/false <- confirms whether extraction ran
+
+Per result when extract=true:
+"extraction": {
+"petitioner_arguments" : "...",
+"respondent_arguments" : "...",
+"court_reasoning" : "...",
+"legal_principles" : "...",
+"decision" : "...",
+"key_facts" : "..."
+}
+
+In generated object when both flags true:
+"extraction_used": true <- confirms structured context was used
+
+
+### Problems encountered and fixed
+- llama-3.3-70b-versatile returned 404 — deprecated June 17 2026.
+  Migrated to qwen/qwen3.6-27b with reasoning_effort="none" for both
+  metadata.py and extractor.py
+- PowerShell displays nested extraction dicts as empty — display
+  limitation only, data is correctly populated in the actual JSON
+- CONFIDENCE: UNKNOWN in V4 mode — model omitting or varying the header
+  format. Fixed with fallback inference from answer content length and
+  refusal pattern detection in parse_response()
+
+### Limitations that motivate V6
+- All retrieved chunks are treated equally regardless of relevance score
+  — a chunk with score 0.73 and one with score 0.55 both go into the
+  context with equal weight
+- The top-k chunks from hybrid search may include marginally relevant
+  results that dilute the generated answer
+- No re-ranking step to push the most precisely relevant chunks to the
+  top before extraction and generation run
+- Extraction quality is bounded by chunk quality — a 400-word chunk
+  that spans multiple argument types produces mixed extractions
+
 ## Roadmap
 
 | Version | Focus | Status |
@@ -320,8 +440,8 @@ When generate=false:
 | V2 | Metadata - extraction, filtering, structured search | Done |
 | V3 | Hybrid search - BM25 + vector + RRF fusion | Done |
 | V4 | Citation-aware generation - grounded LLM answers | Done |
-| V5 | Legal argument extraction - structured reasoning | Next |
-| V6 | Re-ranking - cross-encoder for precision | Planned |
+| V5 | Legal argument extraction - structured reasoning | Done |
+| V6 | Re-ranking - cross-encoder for precision | Next |
 | V7 | Contradiction detection - conflicting judgments | Planned |
 | V8 | Legal strategy intelligence - synthesis | Planned |
 | V9 | Evaluation framework - precision, recall, faithfulness | Planned |

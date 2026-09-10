@@ -4,7 +4,7 @@ A Retrieval-Augmented Generation (RAG) system for analysing Supreme Court of Ind
 judgments (1950-2024). Built as a progressive learning project — each version
 introduces new RAG concepts on top of the previous one.
 
-**Stack:** Python · Flask · ChromaDB · Gemini Embedding API · Groq (Llama 3.3 70B) · pdfplumber · rank_bm25
+**Stack:** Python · Flask · ChromaDB · Gemini Embedding API · Gemini 2.5 Flash · Groq (Llama 3.3 70B) · pdfplumber · rank_bm25
 
 ---
 

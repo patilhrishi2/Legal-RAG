@@ -1,19 +1,5 @@
 # src/retriever.py
-# ─────────────────────────────────────────────────────────────
-# V3 QUERY PIPELINE — Hybrid Search with RRF
-#
-# Changes from V2:
-#   - Runs BM25 keyword search alongside semantic search
-#   - Fuses both ranked lists using Reciprocal Rank Fusion (RRF)
-#   - Fetches full chunk text + metadata from ChromaDB by ID
-#     (BM25 returns IDs only — text lives in ChromaDB)
-#   - Metadata filtering applied to BOTH pipelines
-#
-# Everything else identical to V2:
-#   - Same Gemini embedding for query
-#   - Same ChromaDB where-clause for filters
-#   - Same response structure
-# ─────────────────────────────────────────────────────────────
+# V6 — adds optional re-ranking step after hybrid search
 
 import os
 import chromadb
@@ -29,24 +15,20 @@ CHROMA_PATH   = "storage/chroma_db"
 COLLECTION    = "legal_cases"
 EMBED_MODEL   = "gemini-embedding-001"
 
-# How many candidates each pipeline retrieves before fusion.
-# More candidates = better fusion coverage but more ChromaDB lookups.
-# 20 is the standard starting point for hybrid RAG systems.
-CANDIDATE_K = 20
-
-# RRF constant — dampens the impact of top-ranked results.
-# k=60 is the value used in the original RRF paper (Cormack et al. 2009).
-# Lower k = top ranks matter more. Higher k = more even distribution.
-RRF_K = 60
+# Retrieve more candidates when re-ranking is on —
+# re-ranker needs a larger pool to make meaningful selections.
+# Without re-ranking: retrieve top_k directly.
+# With re-ranking   : retrieve RERANK_CANDIDATE_K, re-rank, return top_k.
+CANDIDATE_K        = 20
+RERANK_CANDIDATE_K = 20   # can increase to 30-40 as index grows
+RRF_K              = 60
 
 
-# ── ChromaDB connection ───────────────────────────────────────
 def get_collection():
     chroma = chromadb.PersistentClient(path=CHROMA_PATH)
     return chroma.get_collection(name=COLLECTION)
 
 
-# ── Query embedding (unchanged from V2) ──────────────────────
 def embed_query(query_text: str) -> list[float]:
     result = gemini_client.models.embed_content(
         model    = EMBED_MODEL,
@@ -56,13 +38,11 @@ def embed_query(query_text: str) -> list[float]:
     return result.embeddings[0].values
 
 
-# ── Where-clause builder (unchanged from V2) ─────────────────
 def build_where_clause(filters: dict) -> dict | None:
     if not filters:
         return None
 
     clauses = []
-
     for field in ["legal_domain", "bench_type", "outcome", "petitioner_type"]:
         if filters.get(field):
             clauses.append({field: {"$eq": filters[field]}})
@@ -81,14 +61,8 @@ def build_where_clause(filters: dict) -> dict | None:
     return {"$and": clauses}
 
 
-# ── Pipeline 1: Semantic search ───────────────────────────────
-def semantic_search(query_text: str, top_k: int, where: dict | None) -> list[dict]:
-    """
-    Embed query → cosine similarity search in ChromaDB.
-    Returns top_k results with semantic rank and distance score.
-
-    Identical to V2 retrieval — just renamed and returns rank too.
-    """
+def semantic_search(query_text: str, top_k: int,
+                    where: dict | None) -> list[dict]:
     collection = get_collection()
     query_vec  = embed_query(query_text)
 
@@ -113,87 +87,17 @@ def semantic_search(query_text: str, top_k: int, where: dict | None) -> list[dic
         raw["ids"][0],
     ), 1):
         results.append({
-            "id"           : chunk_id,
-            "semantic_rank": rank,
+            "id"            : chunk_id,
+            "semantic_rank" : rank,
             "semantic_score": round(1 - dist, 4),
-            "text"         : doc,
-            "metadata"     : meta,
+            "text"          : doc,
+            "metadata"      : meta,
         })
 
     return results
 
 
-# ── Pipeline 2: BM25 search with metadata filter ──────────────
-def bm25_search_filtered(
-    query_text : str,
-    top_k      : int,
-    where      : dict | None
-) -> list[dict]:
-    """
-    BM25 keyword search, then filter results by metadata if needed.
-
-    WHY POST-FILTER FOR BM25?
-    ChromaDB's where-clause only works with its own vector search.
-    BM25 runs on our pickle index which has no metadata awareness.
-    So we: retrieve more candidates (top_k * 4), then discard any
-    chunk whose metadata doesn't match the filter.
-
-    This is the one place we post-filter — it's acceptable here because:
-    (a) BM25 is fast (no API calls), so fetching extra candidates is cheap
-    (b) The BM25 index doesn't store metadata — adding it would duplicate storage
-    """
-    # Get raw BM25 results — more candidates to account for post-filter loss
-    raw_results = search_bm25(query_text, top_k=top_k * 4)
-
-    if not raw_results or not where:
-        # No filter needed — just return top_k as-is with ranks
-        for rank, r in enumerate(raw_results[:top_k], 1):
-            r["bm25_rank"] = rank
-        return raw_results[:top_k]
-
-    # Apply metadata filter: fetch metadata for each candidate from ChromaDB
-    collection   = get_collection()
-    candidate_ids = [r["id"] for r in raw_results]
-
-    try:
-        meta_fetch = collection.get(
-            ids     = candidate_ids,
-            include = ["metadatas"]
-        )
-    except Exception:
-        return []
-
-    # Build a lookup: chunk_id → metadata
-    meta_lookup = {
-        chunk_id: meta
-        for chunk_id, meta in zip(meta_fetch["ids"], meta_fetch["metadatas"])
-    }
-
-    # Filter: keep only chunks that satisfy the where-clause
-    filtered = []
-    for r in raw_results:
-        meta = meta_lookup.get(r["id"], {})
-        if metadata_matches(meta, where):
-            filtered.append(r)
-        if len(filtered) == top_k:
-            break
-
-    # Assign BM25 ranks within the filtered list
-    for rank, r in enumerate(filtered, 1):
-        r["bm25_rank"] = rank
-
-    return filtered
-
-
 def metadata_matches(meta: dict, where: dict) -> bool:
-    """
-    Check if a chunk's metadata satisfies a ChromaDB-style where-clause.
-    Used to post-filter BM25 results which don't go through ChromaDB's filter.
-
-    Supports: $eq, $gte, $lte, $and
-    Mirrors the logic in build_where_clause() so both pipelines
-    apply the same filter semantics.
-    """
     if "$and" in where:
         return all(metadata_matches(meta, clause) for clause in where["$and"])
 
@@ -209,67 +113,67 @@ def metadata_matches(meta: dict, where: dict) -> bool:
         else:
             if val != condition:
                 return False
-
     return True
 
 
-# ── Reciprocal Rank Fusion ────────────────────────────────────
-def reciprocal_rank_fusion(
-    semantic_results : list[dict],
-    bm25_results     : list[dict],
-    top_k            : int
-) -> list[dict]:
-    """
-    Combine two ranked lists into one using RRF.
+def bm25_search_filtered(query_text: str, top_k: int,
+                         where: dict | None) -> list[dict]:
+    raw_results = search_bm25(query_text, top_k=top_k * 4)
 
-    Formula for each chunk:
-        RRF_score = 1/(k + semantic_rank) + 1/(k + bm25_rank)
+    if not raw_results or not where:
+        for rank, r in enumerate(raw_results[:top_k], 1):
+            r["bm25_rank"] = rank
+        return raw_results[:top_k]
 
-    If a chunk appears in only one list, it gets a partial score.
-    If it appears in both, the scores add — rewarding agreement.
+    collection    = get_collection()
+    candidate_ids = [r["id"] for r in raw_results]
 
-    WHY NOT JUST AVERAGE THE RAW SCORES?
-    BM25 scores (0–25) and semantic scores (0–1) are on completely
-    different scales. You can't meaningfully average them without
-    careful normalisation. RRF sidesteps this entirely by only
-    using rank positions — ranks are always comparable integers.
+    try:
+        meta_fetch = collection.get(
+            ids     = candidate_ids,
+            include = ["metadatas"]
+        )
+    except Exception:
+        return []
 
-    Example with k=60:
-      Chunk A: semantic_rank=1, bm25_rank=3
-        RRF = 1/(60+1) + 1/(60+3) = 0.01639 + 0.01587 = 0.03226
+    meta_lookup = {
+        cid: meta
+        for cid, meta in zip(meta_fetch["ids"], meta_fetch["metadatas"])
+    }
 
-      Chunk B: semantic_rank=2, no BM25 result
-        RRF = 1/(60+2) + 0         = 0.01613
+    filtered = []
+    for r in raw_results:
+        meta = meta_lookup.get(r["id"], {})
+        if metadata_matches(meta, where):
+            filtered.append(r)
+        if len(filtered) == top_k:
+            break
 
-      Chunk C: semantic_rank=15, bm25_rank=1
-        RRF = 1/(60+15) + 1/(60+1) = 0.01333 + 0.01639 = 0.02972
+    for rank, r in enumerate(filtered, 1):
+        r["bm25_rank"] = rank
 
-      Final order: A > C > B
-      A wins because both systems agree it's relevant.
-    """
-    # Build lookup: chunk_id → result dict for each pipeline
+    return filtered
+
+
+def reciprocal_rank_fusion(semantic_results: list[dict],
+                           bm25_results: list[dict],
+                           top_k: int) -> list[dict]:
     semantic_lookup = {r["id"]: r for r in semantic_results}
     bm25_lookup     = {r["id"]: r for r in bm25_results}
-
-    # Collect all unique chunk IDs seen in either list
-    all_ids = set(semantic_lookup.keys()) | set(bm25_lookup.keys())
+    all_ids         = set(semantic_lookup.keys()) | set(bm25_lookup.keys())
 
     fused = []
     for chunk_id in all_ids:
         sem  = semantic_lookup.get(chunk_id)
         bm25 = bm25_lookup.get(chunk_id)
 
-        # RRF score — add contribution from whichever lists contain this chunk
         rrf_score = 0.0
         if sem:
             rrf_score += 1.0 / (RRF_K + sem["semantic_rank"])
         if bm25:
             rrf_score += 1.0 / (RRF_K + bm25["bm25_rank"])
 
-        # Prefer semantic result for text/metadata (more complete)
-        # Fall back to fetching from ChromaDB if only in BM25
         result_source = sem or {}
-
         fused.append({
             "id"            : chunk_id,
             "rrf_score"     : round(rrf_score, 6),
@@ -284,7 +188,6 @@ def reciprocal_rank_fusion(
 
     fused.sort(key=lambda x: x["rrf_score"], reverse=True)
 
-    # For chunks only in BM25 (no semantic result), fetch text from ChromaDB
     needs_text = [r for r in fused[:top_k] if not r["text"]]
     if needs_text:
         collection = get_collection()
@@ -301,46 +204,62 @@ def reciprocal_rank_fusion(
             )
         }
         for r in needs_text:
-            data       = text_lookup.get(r["id"], {})
-            r["text"]  = data.get("text",     "")
+            data          = text_lookup.get(r["id"], {})
+            r["text"]     = data.get("text",     "")
             r["metadata"] = data.get("metadata", {})
 
     return fused[:top_k]
 
 
-# ── Main search function ──────────────────────────────────────
-def search(query_text: str, top_k: int = 5, filters: dict = None) -> list[dict]:
+def search(query_text: str, top_k: int = 5,
+           filters: dict = None, rerank: bool = False) -> list[dict]:
     """
-    Full hybrid search pipeline:
-      1. Build where-clause from filters
-      2. Run semantic search  → top CANDIDATE_K results
-      3. Run BM25 search      → top CANDIDATE_K results (post-filtered)
-      4. Fuse with RRF        → top_k final results
-      5. Format and return
+    Full hybrid search pipeline with optional re-ranking.
 
-    The response structure is identical to V2 — main.py needs no changes.
+    rerank=False (default) → V3/V4/V5 behaviour unchanged
+    rerank=True            → retrieve RERANK_CANDIDATE_K candidates,
+                             re-rank with cross-encoder, return top_k
+
+    WHY IMPORT RERANKER INSIDE THE FUNCTION?
+    reranker.py loads the cross-encoder model at import time (~1s, 85MB).
+    If we import at the top of retriever.py, the model loads every time
+    retriever.py is imported — even when reranking isn't needed.
+    Importing inside the function means the model only loads on first
+    rerank=True call, then stays cached in memory for subsequent calls.
     """
     where = build_where_clause(filters or {})
 
+    # Decide candidate pool size
+    candidate_k = RERANK_CANDIDATE_K if rerank else CANDIDATE_K
+
     # Run both pipelines
-    semantic_results = semantic_search(query_text, top_k=CANDIDATE_K, where=where)
-    bm25_results     = bm25_search_filtered(query_text, top_k=CANDIDATE_K, where=where)
+    semantic_results = semantic_search(query_text, top_k=candidate_k, where=where)
+    bm25_results     = bm25_search_filtered(query_text, top_k=candidate_k, where=where)
 
-    # Fuse
-    fused = reciprocal_rank_fusion(semantic_results, bm25_results, top_k=top_k)
+    # Fuse — get more candidates if re-ranking, else get top_k directly
+    fuse_k = RERANK_CANDIDATE_K if rerank else top_k
+    fused  = reciprocal_rank_fusion(semantic_results, bm25_results, top_k=fuse_k)
 
-    # Format — same structure as V2 so main.py works unchanged
+    # ── Optional re-ranking step (new in V6) ──────────────────
+    if rerank and fused:
+        from reranker import rerank as rerank_fn
+        fused = rerank_fn(query_text, fused, top_k=top_k)
+
+    # Format results — same structure as V5
     results = []
     for i, r in enumerate(fused, 1):
         meta = r.get("metadata", {})
         results.append({
             "text"            : r["text"],
             "id"              : r["id"],
-            "score"           : r["rrf_score"],        # RRF score (replaces cosine)
-            "semantic_score"  : r["semantic_score"],   # V2 score, now visible
-            "bm25_score"      : r["bm25_score"],       # new in V3
-            "bm25_rank"       : r["bm25_rank"],        # new in V3
-            "in_both"         : r["in_both"],          # True = both systems agreed
+            # Score field: rerank_score if reranked, else rrf_score
+            "score"           : r.get("rerank_score", r["rrf_score"]),
+            "rrf_score"       : r["rrf_score"],
+            "rerank_score"    : r.get("rerank_score"),   # None if not reranked
+            "rerank_rank"     : r.get("rerank_rank"),    # None if not reranked
+            "semantic_score"  : r["semantic_score"],
+            "bm25_score"      : r["bm25_score"],
+            "in_both"         : r["in_both"],
             "chunk_num"       : int(r["id"].rsplit("__chunk_", 1)[1])
                                 if "__chunk_" in r["id"] else -1,
             "case_name"       : meta.get("case_name",       "Unknown"),
@@ -359,7 +278,6 @@ def search(query_text: str, top_k: int = 5, filters: dict = None) -> list[dict]:
     return results
 
 
-# ── List all cases (unchanged from V2) ───────────────────────
 def list_cases() -> list[dict]:
     collection = get_collection()
     raw        = collection.get(include=["metadatas"])
@@ -390,12 +308,13 @@ def list_cases() -> list[dict]:
     return cases
 
 
-# ── Terminal test ─────────────────────────────────────────────
-def print_results(query: str, results: list, filters: dict = None):
+def print_results(query: str, results: list, filters: dict = None,
+                  reranked: bool = False):
     print(f"\n{'─'*65}")
     print(f"Query  : {query}")
     if filters:
         print(f"Filters: {filters}")
+    print(f"Reranked: {reranked}")
     print(f"{'─'*65}")
 
     if not results:
@@ -403,37 +322,23 @@ def print_results(query: str, results: list, filters: dict = None):
         return
 
     for r in results:
+        score_str = (
+            f"rerank={r['rerank_score']:+.4f}" if r.get("rerank_score") is not None
+            else f"rrf={r['score']:.5f}"
+        )
         both = "✓ both" if r["in_both"] else "  one "
-        sem  = f"{r['semantic_score']:.4f}" if r["semantic_score"] else "  n/a "
-        bm25 = f"{r['bm25_score']:.2f}"     if r["bm25_score"]     else "  n/a"
-        print(f"\n[{r['chunk_num']:>3}] RRF={r['score']:.5f}  sem={sem}  bm25={bm25}  {both}")
-        print(f"       {r['case_name']}  |  {r['legal_domain']}  |  {r['bench_type']}")
-        print(f"       {r['text'][:180]}...")
+        print(f"\n[{r['chunk_num']:>3}] {score_str}  {both}  {r['case_name']}")
+        print(f"       {r['text'][:160]}...")
 
 
 if __name__ == "__main__":
-    # Test 1 — semantic query (paraphrasing, no exact terms)
-    print_results(
-        "personal liberty cannot be taken away arbitrarily",
-        search("personal liberty cannot be taken away arbitrarily", top_k=3)
-    )
+    # Compare V5 vs V6 on same query
+    query = "What are the constitutional limits on preventive detention?"
 
-    # Test 2 — exact citation (BM25 should dominate)
-    print_results(
-        "AIR 1950 SC 27",
-        search("AIR 1950 SC 27", top_k=3)
-    )
+    print("\n── V5 (no re-rank) ─────────────────────────────────────")
+    results_v5 = search(query, top_k=5, rerank=False)
+    print_results(query, results_v5, reranked=False)
 
-    # Test 3 — mixed (both pipelines contribute)
-    print_results(
-        "Article 22 preventive detention fundamental rights",
-        search("Article 22 preventive detention fundamental rights", top_k=3)
-    )
-
-    # Test 4 — with filter
-    print_results(
-        "contract commission agent",
-        search("contract commission agent", top_k=3,
-               filters={"legal_domain": "Contract Law"}),
-        filters={"legal_domain": "Contract Law"}
-    )
+    print("\n── V6 (with re-rank) ───────────────────────────────────")
+    results_v6 = search(query, top_k=5, rerank=True)
+    print_results(query, results_v6, reranked=True)

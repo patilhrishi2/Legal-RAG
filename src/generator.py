@@ -282,7 +282,7 @@ def generate_answer(query: str, chunks: list[dict],
             config = types.GenerateContentConfig(
                 system_instruction = SYSTEM_PROMPT,
                 temperature        = 0.1,
-                max_output_tokens  = 3000,
+                max_output_tokens  = 4000,
             )
         )
 

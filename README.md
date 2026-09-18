@@ -4,7 +4,7 @@ A Retrieval-Augmented Generation (RAG) system for analysing Supreme Court of Ind
 judgments (1950-2024). Built as a progressive learning project — each version
 introduces new RAG concepts on top of the previous one.
 
-**Stack:** Python · Flask · ChromaDB · Gemini Embedding API · Gemini 3.5 Flash · Groq (Qwen 3.6 27B) · pdfplumber · rank_bm25
+**Stack:** Python · Flask · ChromaDB · Gemini Embedding API · Gemini 3.5 Flash · Groq (Qwen 3.6 27B) · cross-encoder/ms-marco-MiniLM-L-6-v2 · pdfplumber · rank_bm25 · sentence-transformers
 
 ---
 
@@ -432,6 +432,125 @@ In generated object when both flags true:
 - Extraction quality is bounded by chunk quality — a 400-word chunk
   that spans multiple argument types produces mixed extractions
 
+## V6 - Re-Ranking
+
+### What it does
+Adds a cross-encoder re-ranking step between hybrid retrieval and
+extraction. After hybrid search retrieves 20 candidates, a cross-encoder
+model scores each one against the query by reading both together in a
+single forward pass. The top 5 by re-rank score go forward to extraction
+and generation. This improves precision — the context window passed to
+the LLM contains the most genuinely relevant chunks, not just the ones
+that scored well on vector similarity or keyword overlap.
+
+### New features
+- **reranker.py** - new file, loads cross-encoder/ms-marco-MiniLM-L-6-v2
+  locally, scores query-chunk pairs, returns sorted results
+- **Lazy model loading** - cross-encoder imported inside retriever.search()
+  so the 85MB model only loads on first rerank=true request, not on every
+  import of retriever.py
+- **rrf_score preserved** - both rrf_score and rerank_score returned per
+  chunk so callers can see where each chunk came from and how much it moved
+- **rerank flag** - independently opt-in alongside extract and generate,
+  same pattern as V5
+
+### Why cross-encoder beats bi-encoder for re-ranking
+
+Bi-encoder (retrieval):
+query → embed → vector A
+chunk → embed → vector B
+score = cosine(A, B)
+Query and chunk embedded independently, never see each other.
+Fast (pre-computed), less precise.
+
+Cross-encoder (re-ranking):
+[query + chunk] → model → single relevance score
+Query and chunk processed together in one forward pass.
+Model attends to every query word while reading every chunk word.
+Slower (must run per query), much more precise.
+
+Standard pattern: retrieve top 20 (recall) → re-rank → take top 5 (precision)
+
+
+### Re-ranking in practice — your actual results
+Query: "What are the constitutional limits on preventive detention?"
+
+Before re-ranking (RRF order):
+  #1 chunk 147 (rrf=0.031) — general constitutional structure
+  #2 chunk 150 (rrf=0.031) — directly lists Article 22 safeguards
+  #9 chunk 264 (rrf=0.016) — three-month limit under clause (7)
+  #10 chunk 186 (rrf=0.016) — valid law requirements for detention
+
+After re-ranking (cross-encoder order):
+  #1 chunk 150 (rerank=+3.39) — Article 22 safeguards ↑1
+  #2 chunk 151 (rerank=+2.26) — right to representation — was not in top 5
+  #3 chunk 161 (rerank=+1.89) — maximum period limits ↑5
+  #4 chunk 186 (rerank=+1.37) — valid law requirements ↑7
+  #5 chunk 264 (rerank=+0.91) — three-month clause (7) ↑5
+
+Chunk 151 was RRF rank 14 — never in any previous answer.
+The cross-encoder surfaced it because it directly addresses
+the right to representation as a constitutional limit.
+
+### Key concepts learned
+- **Cross-encoder vs bi-encoder:** bi-encoder embeds independently and
+  compares, cross-encoder processes together. The latter is more precise
+  because it can attend to every word in both query and chunk simultaneously
+- **Retrieve then re-rank:** generous retrieval (top 20) ensures recall;
+  precise re-ranking (top 5) ensures the context window is high quality
+- **Lazy imports for heavy models:** importing the cross-encoder at module
+  level loads 85MB on every import. Importing inside the function that needs
+  it means the model only loads when actually used, and stays cached in
+  memory for all subsequent calls in the same server process
+- **Score field semantics change with flags:** when rerank=false, score=rrf_score.
+  When rerank=true, score=rerank_score. Both scores always returned separately
+  so consumers can use whichever they need
+- **Local model — no API key:** cross-encoder/ms-marco-MiniLM-L-6-v2 runs
+  on CPU, downloads once to HuggingFace cache (~85MB), inference ~50ms per
+  chunk. Zero ongoing cost regardless of query volume
+
+### API changes
+
+POST /search request — new optional field:
+"rerank": true <- triggers re-ranking (default: false)
+
+POST /search response — new fields per result when rerank=true:
+"rerank_score" : 3.3926, <- cross-encoder score (+/- range)
+"rerank_rank" : 1, <- position after re-ranking
+"rrf_score" : 0.0308, <- original hybrid search score (always present)
+"score" : 3.3926 <- primary score field (rerank_score when reranked,
+rrf_score when not)
+
+"rerank_used": true/false in response root confirms whether re-ranking ran.
+
+
+### Full pipeline flag combinations
+
+rerank=false, extract=false, generate=false -> V3: hybrid search only
+rerank=false, extract=false, generate=true -> V4: raw generation
+rerank=false, extract=true, generate=true -> V5: extract + generate
+rerank=true, extract=false, generate=false -> V6: re-ranked chunks only
+rerank=true, extract=true, generate=true -> V6 full: best quality,
+highest latency (~8-10s)
+
+
+### Problems encountered and fixed
+- max_output_tokens=3000 truncated key_legal_principles mid-sentence
+  on complex queries → increased to 4000 in generator.py
+- cross-encoder loading at module import level caused 1s delay on every
+  retriever.py import → moved import inside search() function, lazy-loaded
+  on first rerank=true request
+
+### Limitations that motivate V7
+- System retrieves and ranks well but treats all cases as independent —
+  no awareness that two cases might reach opposite conclusions on the
+  same legal question
+- A user asking about precedent gets the most relevant chunks but no
+  indication that other cases in the index contradict those findings
+- Contradictory judgments are a critical feature of legal research —
+  knowing that courts have ruled both ways on a question is often more
+  valuable than a single confident answer
+
 ## Roadmap
 
 | Version | Focus | Status |
@@ -441,8 +560,8 @@ In generated object when both flags true:
 | V3 | Hybrid search - BM25 + vector + RRF fusion | Done |
 | V4 | Citation-aware generation - grounded LLM answers | Done |
 | V5 | Legal argument extraction - structured reasoning | Done |
-| V6 | Re-ranking - cross-encoder for precision | Next |
-| V7 | Contradiction detection - conflicting judgments | Planned |
+| V6 | Re-ranking - cross-encoder for precision | Done |
+| V7 | Contradiction detection - conflicting judgments | Next |
 | V8 | Legal strategy intelligence - synthesis | Planned |
 | V9 | Evaluation framework - precision, recall, faithfulness | Planned |
 | V10 | Production architecture - auth, logging, monitoring | Planned |

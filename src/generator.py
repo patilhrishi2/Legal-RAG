@@ -12,6 +12,8 @@ gemini_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 GENERATION_MODEL = "gemini-3.5-flash"
 MAX_CONTEXT_CHUNKS = 5
 
+# In generator.py — replace SYSTEM_PROMPT with this:
+
 SYSTEM_PROMPT = """You are a legal research assistant specialising in Supreme Court of India judgments.
 
 Your job is to answer legal questions based EXCLUSIVELY on the case excerpts provided to you.
@@ -20,14 +22,18 @@ STRICT RULES — follow these without exception:
 1. Use ONLY the provided case excerpts to construct your answer. Do not use your own legal knowledge or training data.
 2. Every factual claim you make MUST be followed by a citation in this format: (Case Name, Citation)
 3. If the provided excerpts do not contain enough information to answer the question, say exactly: "The retrieved documents do not contain sufficient information to answer this question." Do not guess or infer beyond what is explicitly stated.
-4. If different excerpts contain contradictory positions on the same legal point, explicitly flag this: "Note: The sources contain conflicting positions on this point."
+4. If different excerpts contain contradictory positions on the same legal point, explicitly flag this: "Note: The sources contain conflicting positions on this point — [describe the conflict]." Do NOT silently favour one side.
 5. Do not fabricate case names, citations, dates, or legal principles.
 6. Keep your answer focused and structured. Do not pad with generic legal commentary.
+7. If a contradiction report is provided, you MUST acknowledge it in your answer under a CONTRADICTIONS section.
 
 Your answer must follow this exact structure:
 
 ANSWER:
 [Your grounded answer with inline citations]
+
+CONTRADICTIONS:
+[If contradictions were detected, describe them here. If none, write "None detected."]
 
 KEY LEGAL PRINCIPLES:
 [Bullet points of the core legal principles found in the excerpts, each with a citation]
@@ -36,7 +42,7 @@ SOURCES USED:
 [Numbered list of the cases you actually cited, with their citations]
 
 CONFIDENCE:
-[One of: HIGH (answer clearly supported by excerpts) / MEDIUM (partially supported) / LOW (inferred from limited context)]
+[One of: HIGH / MEDIUM / LOW]
 """
 
 
@@ -174,10 +180,10 @@ def build_prompt(query: str, context: str, structured: bool = False) -> str:
     )
 
 
-# ── Parse response (unchanged from V4) ───────────────────────
 def parse_response(raw_text: str) -> dict:
     sections = {
         "answer"              : "",
+        "contradictions"      : "",
         "key_legal_principles": "",
         "sources_used"        : "",
         "confidence"          : "UNKNOWN",
@@ -190,6 +196,7 @@ def parse_response(raw_text: str) -> dict:
 
     section_map = {
         "ANSWER"              : "answer",
+        "CONTRADICTIONS"      : "contradictions",
         "KEY LEGAL PRINCIPLES": "key_legal_principles",
         "SOURCES USED"        : "sources_used",
         "CONFIDENCE"          : "confidence",
@@ -220,13 +227,6 @@ def parse_response(raw_text: str) -> dict:
     if current_section and buffer:
         sections[current_section] = "\n".join(buffer).strip()
 
-    confidence_raw = sections["confidence"].upper()
-    for level in ["HIGH", "MEDIUM", "LOW"]:
-        if level in confidence_raw:
-            sections["confidence"] = level
-            break
-
-        # Fallback: if confidence still UNKNOWN, infer from answer content
     if sections["confidence"] == "UNKNOWN":
         answer_lower = sections["answer"].lower()
         if "do not contain sufficient information" in answer_lower:
@@ -242,18 +242,15 @@ def parse_response(raw_text: str) -> dict:
 
 # ── Main generation function ──────────────────────────────────
 def generate_answer(query: str, chunks: list[dict],
-                    use_extraction: bool = False) -> dict:
+                    use_extraction: bool = False,
+                    contradiction_report: dict = None) -> dict:
     """
-    Generate a grounded answer from retrieved chunks.
-
-    use_extraction=False  →  V4 behaviour, raw chunk text as context
-    use_extraction=True   →  V5 behaviour, structured extraction as context
-                             (chunks must already have "extraction" key
-                              added by extractor.extract_chunks())
+    Generate a grounded answer, now with optional contradiction context.
     """
     if not chunks:
         return {
             "answer"               : "No relevant documents were retrieved.",
+            "contradictions"       : "",
             "key_legal_principles" : "",
             "sources_used"         : "",
             "confidence"           : "LOW",
@@ -262,13 +259,26 @@ def generate_answer(query: str, chunks: list[dict],
             "error"                : None,
         }
 
-    # Choose context builder based on whether extraction was run
     if use_extraction:
         context, sources = build_structured_context(chunks)
     else:
         context, sources = build_raw_context(chunks)
 
+    # Inject contradiction report into prompt if available
+    contradiction_note = ""
+    if contradiction_report and contradiction_report.get("contradictions_found"):
+        contradiction_note = "\n\nCONTRADICTION REPORT:\n"
+        for c in contradiction_report.get("contradictions", []):
+            contradiction_note += (
+                f"- On '{c.get('legal_question', '')}': "
+                f"{c.get('case_1', '')} held '{c.get('case_1_position', '')}' "
+                f"but {c.get('case_2', '')} held '{c.get('case_2_position', '')}'. "
+                f"Overruled: {c.get('overruled', False)}.\n"
+            )
+        contradiction_note += "You MUST acknowledge these contradictions in the CONTRADICTIONS section of your answer."
+
     prompt = build_prompt(query, context, structured=use_extraction)
+    prompt += contradiction_note
 
     try:
         response = gemini_client.models.generate_content(
@@ -291,6 +301,7 @@ def generate_answer(query: str, chunks: list[dict],
 
         return {
             "answer"               : parsed["answer"],
+            "contradictions"       : parsed.get("contradictions", ""),
             "key_legal_principles" : parsed["key_legal_principles"],
             "sources_used"         : parsed["sources_used"],
             "confidence"           : parsed["confidence"],
@@ -303,6 +314,7 @@ def generate_answer(query: str, chunks: list[dict],
     except Exception as e:
         return {
             "answer"               : "",
+            "contradictions"       : "",
             "key_legal_principles" : "",
             "sources_used"         : "",
             "confidence"           : "LOW",

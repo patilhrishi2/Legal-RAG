@@ -9,8 +9,8 @@ from dotenv import load_dotenv
 load_dotenv()
 groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
-MODEL = "qwen/qwen3.6-27b"
-HEADER_WORD_COUNT = 5000
+MODEL = "qwen/qwen3.8-27b"
+HEADER_WORD_COUNT = 3000
 
 SYSTEM_PROMPT = """You are a legal metadata extractor for Supreme Court of India judgments.
 Return ONLY a valid JSON object. No markdown, no explanation, no code fences.

@@ -36,7 +36,7 @@ from dotenv import load_dotenv
 load_dotenv()
 groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
-MODEL = "qwen/qwen3.6-27b"
+MODEL = "qwen/qwen3.8-27b"
 
 SYSTEM_PROMPT = """You are a legal analyst specialising in Supreme Court of India judgments.
 

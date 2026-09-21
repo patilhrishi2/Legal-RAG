@@ -4,7 +4,7 @@ A Retrieval-Augmented Generation (RAG) system for analysing Supreme Court of Ind
 judgments (1950-2024). Built as a progressive learning project — each version
 introduces new RAG concepts on top of the previous one.
 
-**Stack:** Python · Flask · ChromaDB · Gemini Embedding API · Gemini 3.5 Flash · Groq (Qwen 3.6 27B) · cross-encoder/ms-marco-MiniLM-L-6-v2 · pdfplumber · rank_bm25 · sentence-transformers
+**Stack:** Python · Flask · ChromaDB · Gemini Embedding API · Gemini 3.5 Flash · Groq (Qwen 3.8 27B) · cross-encoder/ms-marco-MiniLM-L-6-v2 · pdfplumber · rank_bm25 · sentence-transformers
 
 ---
 
@@ -551,6 +551,136 @@ highest latency (~8-10s)
   knowing that courts have ruled both ways on a question is often more
   valuable than a single confident answer
 
+## V7 - Contradiction Detection
+
+### What it does
+Adds a contradiction detection layer that identifies when cases in the
+index reach opposite conclusions on the same legal question. After
+retrieval and re-ranking, the retrieved chunks are sent to Qwen 3.8 27B
+with a structured prompt asking whether any cases contradict each other.
+The result is a structured contradiction report returned alongside the
+retrieved chunks and generated answer. When contradictions are found,
+the generator is instructed to explicitly acknowledge them in the answer
+rather than silently favouring one side.
+
+### New features
+- **contradiction.py** - new file, sends retrieved chunks to Groq grouped
+  by case, asks for structured contradiction analysis, returns a typed
+  report with legal question, case positions, overruled flag, and significance
+- **Cross-case comparison** - detection compares holdings across cases,
+  not argument components within a case (that is extractor.py's job)
+- **Short-circuit logic** - if all retrieved chunks are from the same
+  case, the Groq call is skipped entirely and a clean explanatory message
+  is returned
+- **Generator awareness** - when contradictions are detected, the
+  contradiction report is injected into the generation prompt so the
+  answer explicitly flags conflicts rather than producing a misleading
+  single confident answer
+- **New Maneka Gandhi case** - added to index as the canonical contradiction
+  partner for A.K. Gopalan — these two Constitution Bench cases directly
+  contradict on Article 21 interpretation
+- **CONTRADICTIONS section** - generator output gains a new labelled
+  section between ANSWER and KEY LEGAL PRINCIPLES
+
+### The canonical contradiction detected
+Query: "Does Article 21 apply to preventive detention?"
+
+A.K. Gopalan vs State of Madras (1950 SC 27):
+  Held Articles 14, 19, and 21 are silos. Article 21 only requires a
+  valid procedure — not a fair, just or reasonable one. Article 22
+  clauses (4)-(7) form a complete code for preventive detention.
+
+Maneka Gandhi vs Union of India (AIR 1978 SC 597):
+  Explicitly overruled Gopalan. Held Article 21 must be read with
+  Articles 14 and 19. Procedure must be just, fair and reasonable —
+  not merely technically valid. Established the due process doctrine
+  in India. overruled=True.
+
+### Key concepts learned
+- **Contradiction detection is semantic not syntactic:** two cases can
+  contradict without sharing a keyword. Gopalan and Maneka Gandhi barely
+  overlap in exact phrasing but are direct contradictions on Article 21.
+  Only an LLM reading both can identify the logical conflict
+- **Retrieval gates detection:** the system can only detect contradictions
+  between cases it retrieved. If only one side of a contradiction is in
+  the top-k, the other side is invisible. Better retrieval directly
+  improves contradiction coverage
+- **Short-circuit on single-case results:** making a Groq call when all
+  chunks are from the same case wastes tokens and time. The has_multiple_cases()
+  check avoids this entirely
+- **Context grouping improves extraction:** chunks are grouped by case
+  before being sent to Groq so the model sees each case's complete position
+  before comparing across cases
+- **Generator must be told about contradictions explicitly:** passing the
+  contradiction report into the prompt as a CONTRADICTION REPORT block
+  forces the model to acknowledge it. Without this injection, the model
+  ignores the contradiction detection result and produces a single-sided answer
+- **Legal research requires uncertainty acknowledgement:** a system that
+  returns a confident single answer when courts have ruled both ways is
+  actively misleading. The contradictions_found field and CONTRADICTIONS
+  section in the answer are the mechanism for surfacing this uncertainty
+
+### New case added to index
+
+Maneka Gandhi vs Union Of India
+Citation : AIR 1978 SC 597
+Year : 1978
+Bench : Constitution Bench (7 judges)
+Outcome : Petition allowed
+Domain : Constitutional Law
+Provisions: Article 14, Article 19, Article 21, Passports Act 1967
+Principle : Procedure established by law under Article 21 must be just,
+fair and reasonable — not arbitrary, capricious or oppressive
+
+
+### API changes
+
+POST /search request — new optional field:
+"detect_contradictions": true <- triggers contradiction detection
+
+POST /search response — new top-level field:
+"contradiction_detection": {
+"contradictions_found" : true,
+"contradiction_count" : 1,
+"contradictions" : [
+{
+"legal_question" : "...",
+"case_1" : "A.K. Gopalan... (1950 SC 27)",
+"case_1_position" : "...",
+"case_2" : "Maneka Gandhi... (AIR 1978 SC 597)",
+"case_2_position" : "...",
+"significance" : "...",
+"overruled" : true
+}
+],
+"analysis_note" : "...",
+"error" : null
+}
+
+In generated object when generate=true and contradictions found:
+"contradictions": "Note: Maneka Gandhi overruled Gopalan on Article 21..."
+
+
+### Problems encountered and fixed
+- qwen/qwen3.6-27b deprecated September 14 2026 → migrated to
+  qwen/qwen3.8-27b across metadata.py, extractor.py, contradiction.py
+- Qwen 3.8 has 7000 ITPM limit — Maneka Gandhi header exceeded this
+  at 5000 words (7614 tokens). Fixed by reducing HEADER_WORD_COUNT to
+  1500 words in patch script (~3500 tokens including prompts)
+- patch_maneka.py required direct Groq call bypassing metadata.py's
+  HEADER_WORD_COUNT constant which Python had cached from old value
+- max_output_tokens=4000 truncated complex multi-opinion answers
+  mid-sentence → increased to 5000 in generator.py
+
+### Limitations that motivate V8
+- Contradiction detection only fires when both contradicting cases are
+  in the retrieved top-k — cases not retrieved are invisible to detection
+- The system identifies contradictions but does not synthesise a
+  strategic recommendation — which position is stronger, which is more
+  recent, which applies to the user's specific fact pattern
+- No weighting by precedential authority — a Constitution Bench judgment
+  and a Division Bench judgment are treated equally in retrieval
+
 ## Roadmap
 
 | Version | Focus | Status |
@@ -561,8 +691,8 @@ highest latency (~8-10s)
 | V4 | Citation-aware generation - grounded LLM answers | Done |
 | V5 | Legal argument extraction - structured reasoning | Done |
 | V6 | Re-ranking - cross-encoder for precision | Done |
-| V7 | Contradiction detection - conflicting judgments | Next |
-| V8 | Legal strategy intelligence - synthesis | Planned |
+| V7 | Contradiction detection - conflicting judgments | Done |
+| V8 | Legal strategy intelligence - synthesis | Next |
 | V9 | Evaluation framework - precision, recall, faithfulness | Planned |
 | V10 | Production architecture - auth, logging, monitoring | Planned |
 

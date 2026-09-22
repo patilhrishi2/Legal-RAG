@@ -681,6 +681,152 @@ In generated object when generate=true and contradictions found:
 - No weighting by precedential authority — a Constitution Bench judgment
   and a Division Bench judgment are treated equally in retrieval
 
+## V8 - Legal Strategy Intelligence
+
+### What it does
+Adds a synthesis layer that transforms retrieved evidence into actionable
+legal strategy. After retrieval, re-ranking, extraction, contradiction
+detection, and generation, a new strategist module analyses everything
+produced and generates a structured strategic assessment: strength of
+position, winning arguments from precedent, failure patterns to avoid,
+key decisive factors courts focus on, recommended primary and fallback
+arguments, and risk factors to anticipate.
+
+### New features
+- **strategist.py** - new file, synthesises all pipeline outputs into
+  a structured strategic assessment using Gemini 3.5 Flash
+- **build_strategy_context()** - assembles chunks grouped by case,
+  extraction results, contradiction report, and generated answer into
+  a single rich context block for the strategist
+- **Eight-section structured output** - situation summary, strength
+  assessment, winning arguments, failure patterns, key decisive factors,
+  recommended strategy, risk factors, confidence
+- **Honest weakness assessment** - when precedents don't match the
+  situation, strength is assessed as WEAK and the mismatch is explicitly
+  flagged (demonstrated with the merchant contract situation)
+- **strategize flag** - independently opt-in, runs after generation,
+  receives the generated answer as additional context
+
+### The strategic assessment sections
+| Section | What it answers |
+|---|---|
+| situation_summary | Brief restatement of the user's legal situation |
+| strength_assessment | STRONG / MODERATE / WEAK with one-line reason |
+| winning_arguments | Arguments that succeeded in retrieved precedents |
+| failure_patterns | Arguments courts rejected — what NOT to lead with |
+| key_decisive_factors | What courts focused on in similar cases |
+| recommended_strategy | Primary argument + fallback if primary fails |
+| risk_factors | Unfavourable precedents, contradictions, missing facts |
+| confidence | HIGH / MEDIUM / LOW based on precedent match quality |
+
+### Generator vs Strategist — the key distinction
+
+Generator (V4): "What has the court held on this topic?"
+Descriptive — reports what precedents say
+Grounded answer with inline citations
+
+Strategist (V8): "Given my situation, what should I argue?"
+Prescriptive — recommends what to do
+Actionable strategy based on precedent patterns
+
+
+### Demonstrated results
+Situation: "Client detained without grounds, four months, no advisory board review"
+  strength_assessment : STRONG
+  Primary argument    : Writ petition on Article 22(4)(a) — four months
+                        without advisory board is a direct constitutional violation
+  Fallback argument   : Article 22(5) non-communication renders detention
+                        void ab initio
+  Failure pattern     : Do not demand alternative tribunals — Gopalan
+                        explicitly rejected this argument
+  Risk factor         : Article 22(6) public interest exception (state
+                        may justify non-disclosure) + Article 22(7)
+                        special parliamentary laws
+
+Situation: "Merchant — buyer refused to complete purchase after delivery arranged"
+  strength_assessment : WEAK
+  Reason              : Only available precedent is agency commission
+                        on property sale — not sale of goods
+  Honest note         : "Severe precedent mismatch — court may reject
+                        these arguments entirely"
+
+### Key concepts learned
+- **Descriptive vs prescriptive generation:** generating what courts
+  held (V4) is different from recommending what to argue (V8). Same
+  retrieved evidence, fundamentally different synthesis task
+- **Honest weakness assessment:** a strategist that manufactures
+  optimism from weak precedents is worse than useless. Strength=WEAK
+  with explicit mismatch explanation is more valuable than a confident
+  wrong strategy
+- **Context richness improves synthesis:** the strategist receives
+  extracted argument structure (V5), contradiction report (V7), and
+  the generated answer (V4) — not just raw chunks. Each earlier stage
+  adds signal that improves strategic reasoning
+- **temperature=0.2 for synthesis:** slightly higher than generator's
+  0.1 — strategy synthesis benefits from a little more reasoning
+  flexibility than factual answer generation
+- **Gemini for synthesis, Groq for extraction:** Groq (Qwen) handles
+  structured JSON extraction tasks (metadata, arguments, contradictions)
+  where speed and JSON precision matter. Gemini handles synthesis tasks
+  (generation, strategy) where reasoning quality matters more
+
+### API changes
+
+POST /search request — new optional field:
+"strategize": true <- triggers strategy synthesis (default: false)
+
+POST /search response — new top-level field:
+"strategy": {
+"situation_summary" : "Client detained for four months...",
+"strength_assessment" : "STRONG — direct Article 22 violation",
+"winning_arguments" : "1. Article 22(4)(a)... 2. Article 22(5)...",
+"failure_patterns" : "1. Do not demand alternative tribunals...",
+"key_decisive_factors": "1. Three-month temporal barrier...",
+"recommended_strategy": "Primary: writ petition... Fallback: void...",
+"risk_factors" : "1. Article 22(6) exception...",
+"confidence" : "HIGH",
+"error" : null
+}
+
+
+### Complete pipeline — all stages
+
+POST /search with all flags:
+hybrid search (top 20) [V3]
+→ re-rank (top 5) [V6]
+→ extract arguments [V5]
+→ detect contradictions [V7]
+→ generate answer [V4]
+→ generate strategy [V8]
+
+
+### Latency profile when all flags enabled
+
+hybrid search ~200ms
+re-ranking ~1s
+extraction ~15s (5 chunks × 3s each with sleep)
+contradiction ~2s
+generation ~5s
+strategy ~5s
+total ~28-30s
+
+
+### Problems encountered and fixed
+- Qwen OTPM rate limit (1000 tokens/min) hit when extraction calls
+  ran back-to-back → added time.sleep(3) between chunks in
+  extract_chunks() in extractor.py
+- import time missing from extractor.py after adding sleep → added
+  to imports
+
+### Limitations that motivate V9
+- No way to know if the strategy is actually good — no evaluation
+  framework exists yet to measure whether recommendations are
+  grounded in retrieved evidence or hallucinated
+- Retrieval quality and generation quality are both unmeasured —
+  we have no precision, recall, or faithfulness scores
+- The system produces confident-sounding output but we have no
+  quantitative measure of how often it is actually correct
+
 ## Roadmap
 
 | Version | Focus | Status |
@@ -692,8 +838,8 @@ In generated object when generate=true and contradictions found:
 | V5 | Legal argument extraction - structured reasoning | Done |
 | V6 | Re-ranking - cross-encoder for precision | Done |
 | V7 | Contradiction detection - conflicting judgments | Done |
-| V8 | Legal strategy intelligence - synthesis | Next |
-| V9 | Evaluation framework - precision, recall, faithfulness | Planned |
+| V8 | Legal strategy intelligence - synthesis | Done |
+| V9 | Evaluation framework - precision, recall, faithfulness | Next |
 | V10 | Production architecture - auth, logging, monitoring | Planned |
 
 ---

@@ -32,6 +32,7 @@ import json
 import re
 from groq import Groq
 from dotenv import load_dotenv
+import time
 
 load_dotenv()
 groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
@@ -200,6 +201,9 @@ def extract_chunks(chunks: list[dict]) -> list[dict]:
         enriched_chunk = dict(chunk)
         enriched_chunk["extraction"] = extraction
         enriched.append(enriched_chunk)
+        if i < len(chunks) - 1:   # don't sleep after last chunk
+            time.sleep(3)          # 3s gap keeps well under 1000 OTPM
+
 
     return enriched
 

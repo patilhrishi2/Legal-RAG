@@ -1,5 +1,5 @@
 # src/main.py
-# V7 — adds contradiction detection
+# V8 — adds legal strategy intelligence
 
 import os
 import sys
@@ -9,11 +9,12 @@ from dotenv import load_dotenv
 load_dotenv()
 sys.path.insert(0, os.path.dirname(__file__))
 
-from retriever    import search, list_cases
-from ingest       import run_ingestion, get_collection
-from generator    import generate_answer
-from extractor    import extract_chunks
+from retriever     import search, list_cases
+from ingest        import run_ingestion, get_collection
+from generator     import generate_answer
+from extractor     import extract_chunks
 from contradiction import detect_contradictions
+from strategist    import generate_strategy
 
 app = Flask(__name__)
 
@@ -27,7 +28,7 @@ def status():
             "status"      : "ok",
             "total_chunks": collection.count(),
             "collection"  : "legal_cases",
-            "version"     : "V7"
+            "version"     : "V8"
         })
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
@@ -71,7 +72,8 @@ def search_cases():
         "rerank"               : true,
         "extract"              : true,
         "detect_contradictions": true,
-        "generate"             : true
+        "generate"             : true,
+        "strategize"           : true
     }
 
     Pipeline order when all flags true:
@@ -80,19 +82,21 @@ def search_cases():
           → extract argument structure
             → detect contradictions across cases
               → generate grounded cited answer
+                → generate legal strategy assessment
     """
     data = request.get_json()
 
     if not data or "query" not in data:
         return jsonify({"error": "Request body must include a 'query' field"}), 400
 
-    query          = data["query"].strip()
-    top_k          = int(data.get("top_k",    5))
-    filters        = data.get("filters",      {})
-    rerank         = data.get("rerank",       False)
-    extract        = data.get("extract",      False)
-    do_contradict  = data.get("detect_contradictions", False)
-    generate       = data.get("generate",     False)
+    query         = data["query"].strip()
+    top_k         = int(data.get("top_k",    5))
+    filters       = data.get("filters",      {})
+    rerank        = data.get("rerank",       False)
+    extract       = data.get("extract",      False)
+    do_contradict = data.get("detect_contradictions", False)
+    generate      = data.get("generate",     False)
+    strategize    = data.get("strategize",   False)
 
     if not query:
         return jsonify({"error": "'query' cannot be empty"}), 400
@@ -157,19 +161,21 @@ def search_cases():
 
         formatted_chunks.append(chunk_entry)
 
-    # ── Step 5: Build response ────────────────────────────────
+    # ── Step 5: Build base response ───────────────────────────
     response = {
-        "query"                     : query,
-        "filters_applied"           : filters,
-        "rerank_used"               : rerank,
-        "extract_used"              : extract,
-        "contradiction_detection"   : contradiction_result,
-        "count"                     : len(formatted_chunks),
-        "results"                   : formatted_chunks,
-        "generated"                 : None,
+        "query"                  : query,
+        "filters_applied"        : filters,
+        "rerank_used"            : rerank,
+        "extract_used"           : extract,
+        "contradiction_detection": contradiction_result,
+        "count"                  : len(formatted_chunks),
+        "results"                : formatted_chunks,
+        "generated"              : None,
+        "strategy"               : None,
     }
 
     # ── Step 6: Optional generation ──────────────────────────
+    gen_result = None
     if generate:
         try:
             gen_result = generate_answer(
@@ -191,6 +197,40 @@ def search_cases():
         except Exception as e:
             response["generated"] = {"answer": "", "error": str(e)}
 
+    # ── Step 7: Optional strategy ─────────────────────────────
+    if strategize:
+        try:
+            strategy_result = generate_strategy(
+                query,
+                chunks,
+                contradiction_report = contradiction_result,
+                generated_answer     = gen_result["answer"]
+                                       if gen_result else None,
+            )
+            response["strategy"] = {
+                "situation_summary"   : strategy_result["situation_summary"],
+                "strength_assessment" : strategy_result["strength_assessment"],
+                "winning_arguments"   : strategy_result["winning_arguments"],
+                "failure_patterns"    : strategy_result["failure_patterns"],
+                "key_decisive_factors": strategy_result["key_decisive_factors"],
+                "recommended_strategy": strategy_result["recommended_strategy"],
+                "risk_factors"        : strategy_result["risk_factors"],
+                "confidence"          : strategy_result["confidence"],
+                "error"               : strategy_result["error"],
+            }
+        except Exception as e:
+            response["strategy"] = {
+                "situation_summary"   : "",
+                "strength_assessment" : "UNKNOWN",
+                "winning_arguments"   : "",
+                "failure_patterns"    : "",
+                "key_decisive_factors": "",
+                "recommended_strategy": "",
+                "risk_factors"        : "",
+                "confidence"          : "LOW",
+                "error"               : str(e),
+            }
+
     return jsonify(response)
 
 
@@ -210,7 +250,7 @@ def ingest():
 
 # ── Run ───────────────────────────────────────────────────────
 if __name__ == "__main__":
-    print("\n🏛  Legal RAG — V7")
+    print("\n🏛  Legal RAG — V8")
     print("   GET  http://localhost:5000/status")
     print("   GET  http://localhost:5000/cases")
     print("   POST http://localhost:5000/search")

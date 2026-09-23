@@ -15,6 +15,7 @@ from generator     import generate_answer
 from extractor     import extract_chunks
 from contradiction import detect_contradictions
 from strategist    import generate_strategy
+from evaluator import evaluate_pipeline, TEST_CASES
 
 app = Flask(__name__)
 
@@ -28,7 +29,7 @@ def status():
             "status"      : "ok",
             "total_chunks": collection.count(),
             "collection"  : "legal_cases",
-            "version"     : "V8"
+            "version"     : "V9"
         })
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
@@ -234,6 +235,119 @@ def search_cases():
     return jsonify(response)
 
 
+# ── POST /evaluate ────────────────────────────────────────────
+@app.route("/evaluate", methods=["POST"])
+def evaluate():
+    """
+    Run evaluation on a query with known relevant cases.
+
+    Request body:
+    {
+        "query"          : "constitutional limits on preventive detention",
+        "relevant_cases" : ["A_K_Gopalan_vs_...PDF", "Maneka_Gandhi_vs_...PDF"],
+        "top_k"          : 5,
+        "rerank"         : true,
+        "eval_faithfulness" : true,
+        "eval_strategy"     : true
+    }
+
+    Or run the built-in test suite:
+    {
+        "run_test_suite": true
+    }
+    """
+    data = request.get_json()
+
+    if not data:
+        return jsonify({"error": "Request body required"}), 400
+
+    # ── Built-in test suite ───────────────────────────────────
+    if data.get("run_test_suite"):
+        from retriever  import search as retriever_search
+        from generator  import generate_answer as gen_answer
+        from strategist import generate_strategy as gen_strategy
+
+        results      = []
+        all_precision = []
+        all_recall    = []
+        all_mrr       = []
+
+        for tc in TEST_CASES:
+            chunks = retriever_search(
+                tc["query"], top_k=5, rerank=True
+            )
+            report = evaluate_pipeline(
+                query          = tc["query"],
+                relevant_cases = tc["relevant_cases"],
+                chunks         = chunks,
+                k              = 5,
+            )
+            results.append({
+                "description"   : tc["description"],
+                "query"         : tc["query"],
+                "summary"       : report["summary"],
+                "retrieval"     : report["retrieval"],
+            })
+            all_precision.append(report["retrieval"]["precision_at_k"])
+            all_recall.append(report["retrieval"]["recall_at_k"])
+            all_mrr.append(report["retrieval"]["mrr"])
+
+        return jsonify({
+            "test_suite_results": results,
+            "aggregate": {
+                "mean_precision_at_5": round(
+                    sum(all_precision)/len(all_precision), 4),
+                "mean_recall_at_5"   : round(
+                    sum(all_recall)/len(all_recall), 4),
+                "mean_mrr"           : round(
+                    sum(all_mrr)/len(all_mrr), 4),
+                "tests_run"          : len(TEST_CASES),
+            }
+        })
+
+    # ── Single query evaluation ───────────────────────────────
+    query          = data.get("query", "").strip()
+    relevant_cases = data.get("relevant_cases", [])
+    top_k          = int(data.get("top_k", 5))
+    rerank         = data.get("rerank", True)
+    eval_faith     = data.get("eval_faithfulness", False)
+    eval_strat     = data.get("eval_strategy",     False)
+
+    if not query:
+        return jsonify({"error": "'query' is required"}), 400
+    if not relevant_cases:
+        return jsonify({"error": "'relevant_cases' list is required"}), 400
+
+    from retriever  import search as retriever_search
+    from generator  import generate_answer as gen_answer
+    from strategist import generate_strategy as gen_strategy
+
+    chunks = retriever_search(query, top_k=top_k, rerank=rerank)
+
+    answer   = None
+    strategy = None
+
+    if eval_faith or eval_strat:
+        gen    = gen_answer(query, chunks)
+        answer = gen["answer"]
+
+    if eval_strat:
+        strat    = gen_strategy(query, chunks, generated_answer=answer)
+        strategy = strat
+
+    try:
+        report = evaluate_pipeline(
+            query            = query,
+            relevant_cases   = relevant_cases,
+            chunks           = chunks,
+            generated_answer = answer,
+            strategy         = strategy,
+            k                = top_k,
+        )
+        return jsonify(report)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 # ── POST /ingest ──────────────────────────────────────────────
 @app.route("/ingest", methods=["POST"])
 def ingest():
@@ -250,9 +364,10 @@ def ingest():
 
 # ── Run ───────────────────────────────────────────────────────
 if __name__ == "__main__":
-    print("\n🏛  Legal RAG — V8")
+    print("\n🏛  Legal RAG — V9")
     print("   GET  http://localhost:5000/status")
     print("   GET  http://localhost:5000/cases")
     print("   POST http://localhost:5000/search")
+    print("   POST http://localhost:5000/evaluate")
     print("   POST http://localhost:5000/ingest\n")
     app.run(debug=True, port=5000)

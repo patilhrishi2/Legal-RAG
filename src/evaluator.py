@@ -518,12 +518,12 @@ if __name__ == "__main__":
         # to keep runtime reasonable)
         answer   = None
         strategy = None
-        if i <= 2:
-            gen    = generate_answer(tc["query"], chunks)
-            answer = gen["answer"]
-            strat  = generate_strategy(tc["query"], chunks,
+        
+        gen    = generate_answer(tc["query"], chunks)
+        answer = gen["answer"]
+        strat  = generate_strategy(tc["query"], chunks,
                                        generated_answer=answer)
-            strategy = strat
+        strategy = strat
 
         # Run evaluation
         report = evaluate_pipeline(

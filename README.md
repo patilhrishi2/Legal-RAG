@@ -827,6 +827,161 @@ total ~28-30s
 - The system produces confident-sounding output but we have no
   quantitative measure of how often it is actually correct
 
+## V9 - Evaluation Framework
+
+### What it does
+Adds systematic measurement of whether the system is actually working.
+Three types of evaluation run against ground truth labels:
+retrieval evaluation (precision, recall, MRR), faithfulness evaluation
+(are generated claims grounded in retrieved chunks?), and strategy
+grounding evaluation (are strategic recommendations backed by retrieved
+cases?). A built-in test suite with hand-labelled ground truth runs
+all five test cases and aggregates scores. A new /evaluate endpoint
+exposes both the test suite and single-query evaluation via the API.
+
+### New features
+- **evaluator.py** - new file with three independent evaluation modules
+- **Retrieval evaluation** - Precision@K, Recall@K, MRR against
+  hand-labelled relevant cases per query
+- **Faithfulness evaluation** - LLM-as-judge: Gemini reads the
+  generated answer and source chunks and scores whether every claim
+  is grounded in the retrieved evidence
+- **Strategy grounding evaluation** - Gemini checks whether strategic
+  recommendations cite cases actually present in retrieved chunks
+- **Built-in test suite** - 5 hand-labelled test cases covering
+  constitutional law queries (Gopalan + Maneka Gandhi) and contract
+  law queries (Abdulla Ahmed, A.M. Mair)
+- **overall_health signal** - GREEN / YELLOW / RED composite signal
+  based on all three scores
+- **POST /evaluate endpoint** - run test suite or evaluate a single
+  query with known relevant cases
+
+### Evaluation metrics explained
+
+Precision@K : of the top-K retrieved chunks, what fraction came from
+relevant cases? Range 0.0-1.0. Higher = fewer irrelevant
+results in the context window.
+
+Recall@K : of all known relevant cases, what fraction appeared in
+the top-K results? Range 0.0-1.0. Higher = fewer
+relevant cases missed.
+
+MRR : Mean Reciprocal Rank — reciprocal of the rank at which
+the first relevant result appeared. MRR=1.0 means the
+most relevant case always appeared at rank 1.
+MRR=0.5 means it appeared at rank 2 on average.
+
+Faithfulness : 0.0-1.0 score from LLM judge. Measures whether every
+claim in the generated answer exists in retrieved chunks.
+Does NOT measure correctness — only grounding.
+
+Strategy : 0.0-1.0 score from LLM judge. Measures whether strategy
+grounding recommendations cite cases actually in retrieved chunks.
+
+
+### Your actual evaluation results (5 cases, 4 indexed documents)
+
+Mean Precision@5 : 0.28 ← expected given only 4 cases in index
+Mean Recall@5 : 0.90 ← excellent — right cases retrieved
+Mean MRR : 1.0 ← perfect — relevant case always at rank 1
+
+Per-test results:
+Test 1 (preventive detention limits):
+P@5=0.20, R@5=0.50, MRR=1.0
+Missed: Maneka Gandhi (passport case, lower on detention query)
+Health: RED — low precision + missed relevant case
+
+Test 2 (Article 21 and preventive detention):
+P@5=0.40, R@5=1.0, MRR=1.0
+Found: Gopalan + Maneka Gandhi
+Health: YELLOW
+
+Test 3 (commission agent contract):
+P@5=0.20, R@5=1.0, MRR=1.0
+Found: Abdulla Ahmed correctly at rank 1
+Health: YELLOW — low precision (other cases in top-5 slots)
+
+Test 4 (jute merchant sale):
+P@5=0.20, R@5=1.0, MRR=1.0
+Found: A.M. Mair correctly at rank 1
+Health: YELLOW
+
+Test 5 (procedure established by law Article 21):
+P@5=0.40, R@5=1.0, MRR=1.0
+Found: Maneka Gandhi + Gopalan
+Health: GREEN
+
+
+### Why precision is low and why that's expected
+With only 4 cases in the index, a top-5 result set will always contain
+chunks from multiple cases even when only 1-2 are relevant — the
+remaining slots have nowhere else to go. With 100+ cases, irrelevant
+cases compete for slots and precision becomes a meaningful signal.
+The MRR=1.0 is the reliable metric at this index size — it confirms
+the right case always ranks first regardless of what fills slots 2-5.
+
+### The genuine finding — Test 1 missed Maneka Gandhi
+"Constitutional limits on preventive detention" retrieves only Gopalan
+because Maneka Gandhi's factual subject is passport impoundment, not
+detention. Its chunks don't match detention-specific queries even
+though it is legally highly relevant. This is the core retrieval
+limitation: semantic and keyword similarity to the query, not legal
+relevance to the topic. A production fix: index key_provisions as
+additional BM25 tokens so "Article 21" in Maneka Gandhi's metadata
+boosts it on Article 21 queries.
+
+### Why LLM-as-judge for faithfulness
+Traditional NLP metrics (BLEU, ROUGE) measure token overlap — a
+paraphrased claim scores low even if perfectly faithful. An LLM judge
+reads both the answer and source chunks and reasons about whether
+claims are supported, much closer to how a human reviewer would
+evaluate a legal answer. The judge is Gemini evaluating Gemini output
+— an independent call with a separate grounding-focused prompt.
+
+### Key concepts learned
+- **You cannot improve what you cannot measure:** eight versions of
+  increasingly sophisticated RAG with no quantitative baseline.
+  V9 adds the numbers that make all previous improvements verifiable
+- **Precision vs recall tradeoff:** high recall (don't miss relevant
+  cases) and high precision (don't include irrelevant ones) conflict
+  at small index sizes. MRR is the most reliable single metric for
+  small indexes
+- **Faithfulness ≠ correctness:** the generated answer may be
+  factually correct but include claims from training data not in the
+  retrieved chunks. Faithfulness measures grounding only
+- **LLM-as-judge pattern:** using one LLM to evaluate another's
+  output with a structured scoring prompt — standard in production
+  RAG evaluation (RAGAS uses the same approach)
+- **Ground truth is expensive:** hand-labelling 5 test cases took
+  deliberate effort. At scale, ground truth labelling is the
+  bottleneck in RAG evaluation. Synthetic ground truth generation
+  (using an LLM to create query-answer pairs from documents) is
+  the production alternative
+
+### API
+
+POST /evaluate
+Body: {"run_test_suite": true}
+→ runs all 5 built-in test cases, returns aggregate metrics
+
+Body: {
+"query": "...",
+"relevant_cases": ["filename.PDF", ...],
+"rerank": true,
+"eval_faithfulness": true,
+"eval_strategy": true
+}
+→ evaluates single query against provided ground truth
+
+
+### Limitations that motivate V10
+- No authentication — anyone with the URL can query the system
+- No request logging — no way to see what queries were made or when
+- No session management — each request is stateless
+- No monitoring — no alerts when the system errors or degrades
+- No query history — users cannot revisit previous searches
+- The system is not yet deployable — runs only on localhost
+
 ## Roadmap
 
 | Version | Focus | Status |
@@ -839,8 +994,8 @@ total ~28-30s
 | V6 | Re-ranking - cross-encoder for precision | Done |
 | V7 | Contradiction detection - conflicting judgments | Done |
 | V8 | Legal strategy intelligence - synthesis | Done |
-| V9 | Evaluation framework - precision, recall, faithfulness | Next |
-| V10 | Production architecture - auth, logging, monitoring | Planned |
+| V9 | Evaluation framework - precision, recall, faithfulness | Done |
+| V10 | Production architecture - auth, logging, monitoring | Next |
 
 ---
 

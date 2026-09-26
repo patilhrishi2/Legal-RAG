@@ -1,0 +1,1586 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Legal Strategy Intelligence — Supreme Court of India</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Crimson+Pro:ital,wght@0,400;0,600;1,400&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+
+/* ── Reset & tokens ─────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --navy:       #1E2A3A;
+  --canvas:     #F7F8FA;
+  --border:     #DDE1E7;
+  --border-mid: #C8CDD6;
+  --muted:      #6B7A8D;
+  --blue:       #2563EB;
+  --blue-tint:  #E8F0FE;
+  --blue-dark:  #1D4ED8;
+  --red:        #DC2626;
+  --red-tint:   #FEF2F2;
+  --green:      #16A34A;
+  --green-tint: #F0FDF4;
+  --amber:      #D97706;
+  --amber-tint: #FFFBEB;
+  --white:      #FFFFFF;
+
+  --serif: 'Crimson Pro', Georgia, serif;
+  --sans:  'Inter', system-ui, sans-serif;
+
+  --sidebar-w: 256px;
+  --drawer-w:  420px;
+}
+
+body {
+  font-family: var(--sans);
+  background: var(--canvas);
+  color: var(--navy);
+  font-size: 13px;
+  line-height: 1.5;
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+
+/* ── Layout shell ────────────────────────────────────────── */
+.shell {
+  display: grid;
+  grid-template-columns: var(--sidebar-w) 1fr;
+  grid-template-rows: 48px 1fr;
+  grid-template-areas:
+    "topbar topbar"
+    "sidebar main";
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* ── Top bar ─────────────────────────────────────────────── */
+.topbar {
+  grid-area: topbar;
+  background: var(--navy);
+  display: flex;
+  align-items: center;
+  padding: 0 20px;
+  gap: 16px;
+  border-bottom: 1px solid rgba(255,255,255,0.08);
+}
+
+.topbar-wordmark {
+  font-family: var(--serif);
+  font-size: 17px;
+  color: var(--white);
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+}
+
+.topbar-wordmark span { color: rgba(255,255,255,0.45); font-weight: 400; }
+
+.topbar-spacer { flex: 1; }
+
+.health-pill {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 11.5px; color: rgba(255,255,255,0.6);
+  cursor: pointer; padding: 4px 10px;
+  border: 1px solid rgba(255,255,255,0.12);
+  border-radius: 20px; transition: background 0.15s;
+}
+.health-pill:hover { background: rgba(255,255,255,0.06); }
+.health-dot { width: 7px; height: 7px; border-radius: 50%; background: #6B7A8D; }
+.health-dot.ok { background: #22C55E; }
+.health-dot.warn { background: #FBBF24; }
+.health-dot.err { background: #EF4444; }
+
+.topbar-btn {
+  font-size: 12px; font-family: var(--sans);
+  color: rgba(255,255,255,0.65); background: none;
+  border: 1px solid rgba(255,255,255,0.12);
+  border-radius: 6px; padding: 5px 12px;
+  cursor: pointer; transition: all 0.15s;
+}
+.topbar-btn:hover { background: rgba(255,255,255,0.08); color: white; }
+.topbar-btn.active { background: rgba(255,255,255,0.12); color: white; }
+
+/* ── Sidebar ─────────────────────────────────────────────── */
+.sidebar {
+  grid-area: sidebar;
+  background: var(--white);
+  border-right: 1px solid var(--border);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+.sidebar-section {
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.sidebar-label {
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--muted);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  margin-bottom: 10px;
+}
+
+/* Pipeline flags */
+.flag-flow {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.flag-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.12s;
+  position: relative;
+}
+.flag-item:hover { background: var(--canvas); }
+
+.flag-connector {
+  position: absolute;
+  left: 22px; top: -2px;
+  width: 1px; height: 8px;
+  background: var(--border);
+}
+.flag-item:first-child .flag-connector { display: none; }
+
+.flag-toggle {
+  width: 32px; height: 18px;
+  background: var(--border);
+  border-radius: 9px;
+  position: relative;
+  flex-shrink: 0;
+  transition: background 0.2s;
+  cursor: pointer;
+}
+.flag-toggle::after {
+  content: '';
+  position: absolute;
+  width: 12px; height: 12px;
+  background: white;
+  border-radius: 50%;
+  top: 3px; left: 3px;
+  transition: transform 0.2s;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+}
+.flag-item.on .flag-toggle { background: var(--blue); }
+.flag-item.on .flag-toggle::after { transform: translateX(14px); }
+
+.flag-info { flex: 1; }
+.flag-name { font-size: 12.5px; font-weight: 500; }
+.flag-desc { font-size: 11px; color: var(--muted); margin-top: 1px; }
+
+/* Filters */
+.filter-group { margin-bottom: 10px; }
+.filter-group:last-child { margin-bottom: 0; }
+.filter-label { font-size: 11.5px; font-weight: 500; margin-bottom: 4px; }
+
+select, input[type="number"], input[type="text"] {
+  width: 100%;
+  font-family: var(--sans);
+  font-size: 12px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--white);
+  color: var(--navy);
+  outline: none;
+  transition: border-color 0.15s;
+}
+select:focus, input:focus { border-color: var(--blue); }
+
+.year-row { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+
+/* Top K slider */
+.topk-row { display: flex; align-items: center; gap: 8px; }
+.topk-row input[type="range"] { flex: 1; }
+.topk-val {
+  font-size: 12px; font-weight: 600; color: var(--blue);
+  min-width: 20px; text-align: right;
+}
+
+/* History list in sidebar */
+.history-list { display: flex; flex-direction: column; gap: 0; }
+.history-item {
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+  transition: color 0.12s;
+}
+.history-item:last-child { border-bottom: none; }
+.history-item:hover .history-q { color: var(--blue); }
+.history-q {
+  font-size: 12px; font-weight: 500;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  transition: color 0.12s;
+}
+.history-meta { font-size: 10.5px; color: var(--muted); margin-top: 2px; }
+
+.sidebar-empty { font-size: 12px; color: var(--muted); padding: 4px 0; }
+
+/* ── Main area ───────────────────────────────────────────── */
+.main {
+  grid-area: main;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  position: relative;
+}
+
+/* Search bar */
+.search-bar {
+  background: var(--white);
+  border-bottom: 1px solid var(--border);
+  padding: 14px 20px;
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+}
+
+.search-wrap {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+textarea#query-input {
+  width: 100%;
+  font-family: var(--serif);
+  font-size: 16px;
+  line-height: 1.5;
+  padding: 10px 14px;
+  border: 1.5px solid var(--border);
+  border-radius: 8px;
+  background: var(--canvas);
+  color: var(--navy);
+  resize: none;
+  min-height: 64px;
+  outline: none;
+  transition: border-color 0.15s;
+}
+textarea#query-input:focus { border-color: var(--blue); background: var(--white); }
+textarea#query-input::placeholder { color: var(--muted); font-style: italic; }
+
+.search-actions { display: flex; align-items: center; gap: 8px; }
+
+.btn-primary {
+  font-family: var(--sans);
+  font-size: 13px; font-weight: 600;
+  background: var(--blue);
+  color: white;
+  border: none;
+  border-radius: 8px;
+  padding: 10px 20px;
+  cursor: pointer;
+  transition: background 0.15s;
+  white-space: nowrap;
+  min-width: 100px;
+  display: flex; align-items: center; gap: 6px;
+}
+.btn-primary:hover { background: var(--blue-dark); }
+.btn-primary:disabled { background: var(--border-mid); cursor: not-allowed; }
+
+.btn-ghost {
+  font-family: var(--sans);
+  font-size: 12px;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 12px;
+  cursor: pointer;
+  color: var(--muted);
+  transition: all 0.15s;
+}
+.btn-ghost:hover { border-color: var(--border-mid); color: var(--navy); }
+
+/* Contradiction banner */
+.contradiction-banner {
+  background: var(--red-tint);
+  border-bottom: 1px solid #FECACA;
+  padding: 10px 20px;
+  display: none;
+  align-items: flex-start;
+  gap: 10px;
+}
+.contradiction-banner.visible { display: flex; }
+.cb-icon { font-size: 15px; flex-shrink: 0; margin-top: 1px; }
+.cb-content { flex: 1; }
+.cb-title { font-size: 12.5px; font-weight: 600; color: var(--red); margin-bottom: 2px; }
+.cb-text { font-size: 12px; color: #7F1D1D; line-height: 1.5; }
+
+/* Results area */
+.results-area {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px 20px;
+}
+
+/* State panels */
+.state-panel {
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  height: 100%; min-height: 200px;
+  text-align: center; padding: 40px;
+}
+.state-icon { font-size: 36px; margin-bottom: 12px; }
+.state-title { font-family: var(--serif); font-size: 20px; margin-bottom: 6px; }
+.state-desc { font-size: 13px; color: var(--muted); max-width: 340px; line-height: 1.6; }
+
+/* Loading spinner */
+.spinner {
+  width: 28px; height: 28px;
+  border: 2.5px solid var(--border);
+  border-top-color: var(--blue);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+  margin-bottom: 14px;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* Results list */
+.results-header {
+  display: flex; align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+.results-count {
+  font-size: 12px; color: var(--muted);
+}
+.results-count strong { color: var(--navy); }
+
+.result-card {
+  background: var(--white);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin-bottom: 8px;
+  overflow: hidden;
+  transition: border-color 0.15s;
+}
+.result-card:hover { border-color: var(--border-mid); }
+
+.result-card-head {
+  padding: 10px 14px;
+  display: flex; align-items: flex-start; gap: 10px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.result-rank {
+  font-size: 11px; font-weight: 600; color: var(--muted);
+  min-width: 20px; margin-top: 2px;
+}
+
+.result-info { flex: 1; min-width: 0; }
+
+.result-case {
+  font-family: var(--serif);
+  font-size: 15px; font-weight: 600;
+  color: var(--navy); margin-bottom: 3px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+.result-meta {
+  display: flex; flex-wrap: wrap; gap: 6px;
+  align-items: center;
+}
+
+.meta-pill {
+  font-size: 10.5px; padding: 2px 7px;
+  border-radius: 20px; font-weight: 500;
+}
+.pill-domain  { background: var(--blue-tint); color: var(--blue-dark); }
+.pill-year    { background: var(--canvas); color: var(--muted); border: 1px solid var(--border); }
+.pill-bench   { background: #F3F4F6; color: #374151; }
+.pill-outcome-d { background: var(--red-tint); color: var(--red); }
+.pill-outcome-a { background: var(--green-tint); color: var(--green); }
+.pill-outcome   { background: var(--amber-tint); color: var(--amber); }
+
+.result-scores {
+  display: flex; flex-direction: column;
+  align-items: flex-end; gap: 3px;
+  flex-shrink: 0;
+}
+
+.score-bar-wrap { display: flex; align-items: center; gap: 5px; }
+.score-label { font-size: 10px; color: var(--muted); }
+.score-val {
+  font-size: 11px; font-weight: 600;
+  font-family: monospace;
+}
+.score-track {
+  width: 48px; height: 4px;
+  background: var(--border); border-radius: 2px; overflow: hidden;
+}
+.score-fill { height: 100%; border-radius: 2px; background: var(--blue); }
+
+.in-both-badge {
+  font-size: 10px; font-weight: 600;
+  background: var(--green-tint); color: var(--green);
+  padding: 1px 6px; border-radius: 10px;
+}
+
+/* Expandable chunk text */
+.result-card-body {
+  padding: 0 14px 12px 44px;
+  display: none;
+}
+.result-card.expanded .result-card-body { display: block; }
+.result-card.expanded .result-card-head { border-bottom: 1px solid var(--border); padding-bottom: 10px; }
+
+.chunk-text {
+  font-family: var(--serif);
+  font-size: 14px; line-height: 1.7;
+  color: #2D3748;
+  padding-top: 10px;
+}
+
+.extraction-grid {
+  margin-top: 10px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+.ext-card {
+  background: var(--canvas);
+  border-radius: 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+}
+.ext-card-label {
+  font-size: 10px; font-weight: 600; color: var(--muted);
+  text-transform: uppercase; letter-spacing: 0.05em;
+  margin-bottom: 4px;
+}
+.ext-card-text { font-size: 12px; line-height: 1.5; color: var(--navy); }
+
+/* ── Right drawer ────────────────────────────────────────── */
+.drawer-overlay {
+  position: fixed; inset: 0;
+  background: rgba(0,0,0,0.15);
+  z-index: 100;
+  display: none;
+  opacity: 0;
+  transition: opacity 0.25s;
+}
+.drawer-overlay.open { display: block; opacity: 1; }
+
+.drawer {
+  position: fixed;
+  top: 48px; right: 0; bottom: 0;
+  width: var(--drawer-w);
+  background: var(--white);
+  border-left: 1px solid var(--border);
+  z-index: 101;
+  display: flex; flex-direction: column;
+  transform: translateX(100%);
+  transition: transform 0.28s cubic-bezier(0.4, 0, 0.2, 1);
+  box-shadow: -4px 0 24px rgba(0,0,0,0.06);
+}
+.drawer.open { transform: translateX(0); }
+
+.drawer-tabs {
+  display: flex;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.drawer-tab {
+  flex: 1; padding: 11px 8px;
+  font-size: 12px; font-weight: 500;
+  text-align: center; cursor: pointer;
+  color: var(--muted); border-bottom: 2px solid transparent;
+  transition: all 0.15s;
+}
+.drawer-tab.active { color: var(--blue); border-bottom-color: var(--blue); }
+.drawer-tab:hover:not(.active) { color: var(--navy); }
+
+.drawer-body {
+  flex: 1; overflow-y: auto;
+  padding: 16px;
+}
+
+.drawer-close {
+  position: absolute; top: 10px; right: 12px;
+  background: none; border: none;
+  font-size: 18px; color: var(--muted);
+  cursor: pointer; padding: 4px;
+  line-height: 1;
+}
+.drawer-close:hover { color: var(--navy); }
+
+.drawer-panel { display: none; }
+.drawer-panel.active { display: block; }
+
+/* Answer section */
+.answer-section { margin-bottom: 20px; }
+.answer-section-title {
+  font-size: 10.5px; font-weight: 600; color: var(--muted);
+  letter-spacing: 0.06em; text-transform: uppercase;
+  margin-bottom: 8px;
+}
+.answer-text {
+  font-family: var(--serif);
+  font-size: 15px; line-height: 1.75;
+  color: var(--navy);
+}
+.answer-text strong { font-weight: 600; }
+
+.confidence-badge {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 3px 10px; border-radius: 20px;
+  font-size: 11.5px; font-weight: 600;
+  margin-top: 10px;
+}
+.conf-high { background: var(--green-tint); color: var(--green); }
+.conf-med  { background: var(--amber-tint); color: var(--amber); }
+.conf-low  { background: var(--red-tint);   color: var(--red); }
+
+/* Strategy sections */
+.strength-badge {
+  display: inline-block; padding: 4px 14px;
+  border-radius: 6px; font-size: 13px; font-weight: 600;
+  margin-bottom: 14px;
+}
+.str-strong { background: var(--green-tint); color: var(--green); }
+.str-moderate { background: var(--amber-tint); color: var(--amber); }
+.str-weak { background: var(--red-tint); color: var(--red); }
+
+.strategy-section { margin-bottom: 16px; }
+.strategy-section-title {
+  font-size: 11px; font-weight: 600; color: var(--muted);
+  text-transform: uppercase; letter-spacing: 0.06em;
+  margin-bottom: 6px;
+}
+.strategy-text {
+  font-size: 13px; line-height: 1.65; color: var(--navy);
+}
+
+/* Sources list */
+.source-item {
+  display: flex; gap: 10px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+}
+.source-item:last-child { border-bottom: none; }
+.source-num {
+  font-size: 11px; font-weight: 600; color: var(--blue);
+  min-width: 18px;
+}
+.source-info { flex: 1; }
+.source-case {
+  font-family: var(--serif); font-size: 14px; font-weight: 600;
+  margin-bottom: 2px;
+}
+.source-meta { font-size: 11px; color: var(--muted); }
+
+/* Contradiction in drawer */
+.contradiction-item {
+  border: 1px solid #FECACA;
+  border-radius: 8px;
+  padding: 12px 14px;
+  background: var(--red-tint);
+  margin-bottom: 10px;
+}
+.ci-question {
+  font-size: 12.5px; font-weight: 600; color: var(--red);
+  margin-bottom: 8px;
+}
+.ci-row { display: flex; gap: 8px; margin-bottom: 6px; }
+.ci-case-label {
+  font-size: 10.5px; font-weight: 600;
+  min-width: 48px; color: var(--muted);
+  padding-top: 1px;
+}
+.ci-case-text { font-size: 12px; flex: 1; line-height: 1.5; }
+.ci-overruled {
+  font-size: 10.5px; font-weight: 600;
+  background: var(--red); color: white;
+  padding: 2px 8px; border-radius: 10px;
+  display: inline-block; margin-top: 6px;
+}
+
+/* Health panel */
+.health-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 14px; }
+.health-card {
+  background: var(--canvas); border-radius: 8px;
+  padding: 10px 12px; border: 1px solid var(--border);
+}
+.health-card-label { font-size: 10.5px; color: var(--muted); margin-bottom: 4px; }
+.health-card-val { font-size: 18px; font-weight: 600; font-family: var(--serif); }
+.hc-ok   { color: var(--green); }
+.hc-warn { color: var(--amber); }
+.hc-err  { color: var(--red); }
+
+/* History tab in drawer */
+.history-drawer-item {
+  padding: 10px 0; border-bottom: 1px solid var(--border);
+  cursor: pointer;
+}
+.history-drawer-item:last-child { border-bottom: none; }
+.history-drawer-item:hover .hdi-query { color: var(--blue); }
+.hdi-query { font-size: 13px; font-weight: 500; margin-bottom: 3px; transition: color 0.12s; }
+.hdi-meta { font-size: 11px; color: var(--muted); display: flex; gap: 8px; flex-wrap: wrap; }
+.hdi-flag {
+  background: var(--blue-tint); color: var(--blue-dark);
+  padding: 1px 6px; border-radius: 10px;
+  font-size: 10px; font-weight: 500;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar { width: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border-mid); border-radius: 3px; }
+
+/* Utility */
+.hidden { display: none !important; }
+
+</style>
+</head>
+<body>
+
+<!-- ── Top bar ─────────────────────────────────────────────── -->
+<div class="shell">
+<header class="topbar">
+  <div class="topbar-wordmark">
+    Legal Strategy Intelligence <span>/ Supreme Court of India</span>
+  </div>
+  <div class="topbar-spacer"></div>
+  <div class="health-pill" onclick="openHealth()">
+    <div class="health-dot" id="health-dot"></div>
+    <span id="health-label">Checking…</span>
+  </div>
+  <button class="topbar-btn" id="history-topbar-btn" onclick="openHistory()">History</button>
+  <button class="topbar-btn" id="cases-topbar-btn" onclick="openCases()">Cases</button>
+</header>
+
+<!-- ── Sidebar ─────────────────────────────────────────────── -->
+<aside class="sidebar">
+
+  <!-- Pipeline flags -->
+  <div class="sidebar-section">
+    <div class="sidebar-label">Pipeline stages</div>
+    <div class="flag-flow">
+      <div class="flag-item on" id="flag-rerank" onclick="toggleFlag('rerank')">
+        <div class="flag-connector"></div>
+        <div class="flag-toggle"></div>
+        <div class="flag-info">
+          <div class="flag-name">Re-rank</div>
+          <div class="flag-desc">Cross-encoder precision</div>
+        </div>
+      </div>
+      <div class="flag-item on" id="flag-extract" onclick="toggleFlag('extract')">
+        <div class="flag-connector"></div>
+        <div class="flag-toggle"></div>
+        <div class="flag-info">
+          <div class="flag-name">Extract</div>
+          <div class="flag-desc">Argument structure</div>
+        </div>
+      </div>
+      <div class="flag-item on" id="flag-contradictions" onclick="toggleFlag('contradictions')">
+        <div class="flag-connector"></div>
+        <div class="flag-toggle"></div>
+        <div class="flag-info">
+          <div class="flag-name">Contradictions</div>
+          <div class="flag-desc">Cross-case conflicts</div>
+        </div>
+      </div>
+      <div class="flag-item on" id="flag-generate" onclick="toggleFlag('generate')">
+        <div class="flag-connector"></div>
+        <div class="flag-toggle"></div>
+        <div class="flag-info">
+          <div class="flag-name">Generate</div>
+          <div class="flag-desc">Grounded answer</div>
+        </div>
+      </div>
+      <div class="flag-item on" id="flag-strategize" onclick="toggleFlag('strategize')">
+        <div class="flag-connector"></div>
+        <div class="flag-toggle"></div>
+        <div class="flag-info">
+          <div class="flag-name">Strategize</div>
+          <div class="flag-desc">Legal strategy</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Filters -->
+  <div class="sidebar-section">
+    <div class="sidebar-label">Filters</div>
+
+    <div class="filter-group">
+      <div class="filter-label">Legal domain</div>
+      <select id="filter-domain">
+        <option value="">All domains</option>
+        <option>Constitutional Law</option>
+        <option>Criminal Law</option>
+        <option>Contract Law</option>
+        <option>Property Law</option>
+        <option>Family Law</option>
+        <option>Tax Law</option>
+        <option>Labour Law</option>
+        <option>Administrative Law</option>
+        <option>Civil Law</option>
+      </select>
+    </div>
+
+    <div class="filter-group">
+      <div class="filter-label">Bench type</div>
+      <select id="filter-bench">
+        <option value="">Any bench</option>
+        <option>Constitution Bench</option>
+        <option>Full Bench</option>
+        <option>Division Bench</option>
+        <option>Single Bench</option>
+      </select>
+    </div>
+
+    <div class="filter-group">
+      <div class="filter-label">Outcome</div>
+      <select id="filter-outcome">
+        <option value="">Any outcome</option>
+        <option>Petition dismissed</option>
+        <option>Petition allowed</option>
+        <option>Appeal dismissed</option>
+        <option>Appeal allowed</option>
+        <option>Partially allowed</option>
+      </select>
+    </div>
+
+    <div class="filter-group">
+      <div class="filter-label">Year range</div>
+      <div class="year-row">
+        <input type="number" id="filter-year-from" placeholder="From" min="1950" max="2024">
+        <input type="number" id="filter-year-to"   placeholder="To"   min="1950" max="2024">
+      </div>
+    </div>
+
+    <div class="filter-group">
+      <div class="filter-label">Results (top‑k)</div>
+      <div class="topk-row">
+        <input type="range" id="topk-slider" min="1" max="10" value="5"
+               oninput="document.getElementById('topk-val').textContent=this.value">
+        <span class="topk-val" id="topk-val">5</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Recent searches (sidebar) -->
+  <div class="sidebar-section" style="flex:1">
+    <div class="sidebar-label">Recent searches</div>
+    <div class="history-list" id="sidebar-history">
+      <div class="sidebar-empty">No searches yet</div>
+    </div>
+  </div>
+
+</aside>
+
+<!-- ── Main area ──────────────────────────────────────────── -->
+<main class="main">
+
+  <!-- Search bar -->
+  <div class="search-bar">
+    <div class="search-wrap">
+      <textarea id="query-input"
+        placeholder="Describe the legal situation or ask a research question…"
+        rows="3"
+        onkeydown="handleKey(event)"></textarea>
+      <div class="search-actions">
+        <button class="btn-ghost" onclick="clearSearch()">Clear</button>
+      </div>
+    </div>
+    <button class="btn-primary" id="search-btn" onclick="doSearch()">
+      <span id="search-btn-icon">⌕</span>
+      <span id="search-btn-text">Search</span>
+    </button>
+  </div>
+
+  <!-- Contradiction banner -->
+  <div class="contradiction-banner" id="contradiction-banner">
+    <div class="cb-icon">⚠️</div>
+    <div class="cb-content">
+      <div class="cb-title" id="cb-title">Conflicting precedents detected</div>
+      <div class="cb-text" id="cb-text"></div>
+    </div>
+    <button class="btn-ghost" onclick="openDrawerTab('contradictions')"
+            style="flex-shrink:0;font-size:11px">View details</button>
+  </div>
+
+  <!-- Results -->
+  <div class="results-area" id="results-area">
+    <!-- Empty state -->
+    <div class="state-panel" id="state-empty">
+      <div class="state-icon">⚖️</div>
+      <div class="state-title">Search the index</div>
+      <div class="state-desc">Enter a legal question or describe a situation. Use the pipeline toggles to control which stages run.</div>
+    </div>
+
+    <!-- Loading state -->
+    <div class="state-panel hidden" id="state-loading">
+      <div class="spinner"></div>
+      <div class="state-title" id="loading-title">Searching…</div>
+      <div class="state-desc" id="loading-desc">Running hybrid retrieval</div>
+    </div>
+
+    <!-- Error state -->
+    <div class="state-panel hidden" id="state-error">
+      <div class="state-icon">⛔</div>
+      <div class="state-title">Search failed</div>
+      <div class="state-desc" id="error-desc"></div>
+    </div>
+
+    <!-- Results -->
+    <div class="hidden" id="results-content">
+      <div class="results-header">
+        <div class="results-count" id="results-count"></div>
+        <div style="display:flex;gap:6px">
+          <button class="btn-ghost" id="open-answer-btn"
+                  onclick="openDrawerTab('answer')" style="display:none">
+            View answer →
+          </button>
+          <button class="btn-ghost" id="open-strategy-btn"
+                  onclick="openDrawerTab('strategy')" style="display:none">
+            View strategy →
+          </button>
+        </div>
+      </div>
+      <div id="results-list"></div>
+    </div>
+  </div>
+
+</main>
+</div><!-- end shell -->
+
+<!-- ── Right drawer ───────────────────────────────────────── -->
+<div class="drawer-overlay" id="drawer-overlay" onclick="closeDrawer()"></div>
+
+<div class="drawer" id="drawer">
+  <button class="drawer-close" onclick="closeDrawer()">✕</button>
+
+  <div class="drawer-tabs">
+    <div class="drawer-tab active" id="dtab-answer"        onclick="openDrawerTab('answer')">Answer</div>
+    <div class="drawer-tab"        id="dtab-strategy"      onclick="openDrawerTab('strategy')">Strategy</div>
+    <div class="drawer-tab"        id="dtab-contradictions" onclick="openDrawerTab('contradictions')">Conflicts</div>
+    <div class="drawer-tab"        id="dtab-sources"       onclick="openDrawerTab('sources')">Sources</div>
+    <div class="drawer-tab"        id="dtab-health"        onclick="openDrawerTab('health')">Health</div>
+    <div class="drawer-tab"        id="dtab-history"       onclick="openDrawerTab('history')">History</div>
+    <div class="drawer-tab"        id="dtab-cases"         onclick="openDrawerTab('cases')">Cases</div>
+  </div>
+
+  <div class="drawer-body">
+
+    <!-- Answer panel -->
+    <div class="drawer-panel active" id="dpanel-answer">
+      <div class="state-panel" id="answer-empty" style="min-height:120px">
+        <div class="state-desc">Run a search with Generate enabled to see an answer here.</div>
+      </div>
+      <div id="answer-content" class="hidden">
+        <div class="answer-section">
+          <div class="answer-section-title">Answer</div>
+          <div class="answer-text" id="answer-text"></div>
+          <div id="answer-confidence"></div>
+        </div>
+        <div class="answer-section" id="contradictions-in-answer" style="display:none">
+          <div class="answer-section-title">Conflicting precedents</div>
+          <div class="answer-text" id="answer-contradictions-text" style="font-family:var(--sans);font-size:13px"></div>
+        </div>
+        <div class="answer-section">
+          <div class="answer-section-title">Key legal principles</div>
+          <div class="answer-text" id="answer-principles" style="font-family:var(--sans);font-size:13px;line-height:1.65"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Strategy panel -->
+    <div class="drawer-panel" id="dpanel-strategy">
+      <div class="state-panel" id="strategy-empty" style="min-height:120px">
+        <div class="state-desc">Run a search with Strategize enabled to see a strategic assessment here.</div>
+      </div>
+      <div id="strategy-content" class="hidden">
+        <div id="strength-badge-wrap" style="margin-bottom:14px"></div>
+
+        <div class="strategy-section">
+          <div class="strategy-section-title">Situation</div>
+          <div class="strategy-text" id="s-situation"></div>
+        </div>
+        <div class="strategy-section">
+          <div class="strategy-section-title">Winning arguments</div>
+          <div class="strategy-text" id="s-winning"></div>
+        </div>
+        <div class="strategy-section">
+          <div class="strategy-section-title">What not to argue</div>
+          <div class="strategy-text" id="s-failure"></div>
+        </div>
+        <div class="strategy-section">
+          <div class="strategy-section-title">Key decisive factors</div>
+          <div class="strategy-text" id="s-factors"></div>
+        </div>
+        <div class="strategy-section">
+          <div class="strategy-section-title">Recommended approach</div>
+          <div class="strategy-text" id="s-recommended"></div>
+        </div>
+        <div class="strategy-section">
+          <div class="strategy-section-title">Risk factors</div>
+          <div class="strategy-text" id="s-risks"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Contradictions panel -->
+    <div class="drawer-panel" id="dpanel-contradictions">
+      <div class="state-panel" id="contradictions-empty" style="min-height:120px">
+        <div class="state-desc">Run a search with Contradictions enabled to see cross-case conflicts here.</div>
+      </div>
+      <div id="contradictions-content" class="hidden">
+        <div id="contradictions-list"></div>
+        <div class="answer-section" style="margin-top:12px">
+          <div class="answer-section-title">Analysis note</div>
+          <div class="strategy-text" id="contradiction-note"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Sources panel -->
+    <div class="drawer-panel" id="dpanel-sources">
+      <div class="state-panel" id="sources-empty" style="min-height:120px">
+        <div class="state-desc">Sources used by the generated answer will appear here.</div>
+      </div>
+      <div id="sources-content" class="hidden">
+        <div id="sources-list"></div>
+      </div>
+    </div>
+
+    <!-- Health panel -->
+    <div class="drawer-panel" id="dpanel-health">
+      <div class="state-panel" id="health-empty" style="min-height:80px">
+        <div class="state-desc">Loading system health…</div>
+      </div>
+      <div id="health-content" class="hidden"></div>
+    </div>
+
+    <!-- History panel -->
+    <div class="drawer-panel" id="dpanel-history">
+      <div id="history-drawer-content">
+        <div class="state-panel" style="min-height:80px">
+          <div class="state-desc">Loading history…</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Cases panel -->
+    <div class="drawer-panel" id="dpanel-cases">
+      <div id="cases-drawer-content">
+        <div class="state-panel" style="min-height:80px">
+          <div class="state-desc">Loading indexed cases…</div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<script>
+// ── Config ──────────────────────────────────────────────────
+const API = 'http://localhost:5000';
+
+// ── State ───────────────────────────────────────────────────
+let flags = { rerank: true, extract: true, contradictions: true, generate: true, strategize: true };
+let lastResults = null;
+let searching   = false;
+
+// ── Flag toggles ─────────────────────────────────────────────
+function toggleFlag(name) {
+  flags[name] = !flags[name];
+  const el = document.getElementById('flag-' + name);
+  el.classList.toggle('on', flags[name]);
+}
+
+// ── Search ───────────────────────────────────────────────────
+function handleKey(e) {
+  if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); doSearch(); }
+}
+
+function clearSearch() {
+  document.getElementById('query-input').value = '';
+  showState('empty');
+  document.getElementById('results-content').classList.add('hidden');
+  hideContradictionBanner();
+  document.getElementById('open-answer-btn').style.display = 'none';
+  document.getElementById('open-strategy-btn').style.display = 'none';
+}
+
+async function doSearch() {
+  const query = document.getElementById('query-input').value.trim();
+  if (!query || searching) return;
+
+  searching = true;
+  setLoading(true);
+  showState('loading');
+  hideContradictionBanner();
+  document.getElementById('results-content').classList.add('hidden');
+  resetDrawerPanels();
+
+  // Build filters
+  const filters = {};
+  const domain  = document.getElementById('filter-domain').value;
+  const bench   = document.getElementById('filter-bench').value;
+  const outcome = document.getElementById('filter-outcome').value;
+  const yfrom   = document.getElementById('filter-year-from').value;
+  const yto     = document.getElementById('filter-year-to').value;
+
+  if (domain)  filters.legal_domain = domain;
+  if (bench)   filters.bench_type   = bench;
+  if (outcome) filters.outcome      = outcome;
+  if (yfrom)   filters.year_from    = parseInt(yfrom);
+  if (yto)     filters.year_to      = parseInt(yto);
+
+  const body = {
+    query,
+    top_k    : parseInt(document.getElementById('topk-slider').value),
+    filters,
+    rerank               : flags.rerank,
+    extract              : flags.extract,
+    detect_contradictions: flags.contradictions,
+    generate             : flags.generate,
+    strategize           : flags.strategize,
+  };
+
+  // Update loading message based on flags
+  updateLoadingMessage(flags);
+
+  try {
+    const res  = await fetch(`${API}/search`, {
+      method : 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body   : JSON.stringify(body),
+    });
+    const data = await res.json();
+
+    if (!res.ok) {
+      showState('error');
+      document.getElementById('error-desc').textContent = data.error || 'Unknown error';
+      return;
+    }
+
+    lastResults = data;
+    renderResults(data);
+    addToSidebarHistory(query, data);
+
+  } catch (e) {
+    showState('error');
+    document.getElementById('error-desc').textContent =
+      'Could not reach the server. Is Flask running on localhost:5000?';
+  } finally {
+    searching = false;
+    setLoading(false);
+  }
+}
+
+function updateLoadingMessage(f) {
+  const steps = ['Retrieving'];
+  if (f.rerank)         steps.push('re-ranking');
+  if (f.extract)        steps.push('extracting arguments');
+  if (f.contradictions) steps.push('checking conflicts');
+  if (f.generate)       steps.push('generating answer');
+  if (f.strategize)     steps.push('building strategy');
+  document.getElementById('loading-desc').textContent = steps.join(' → ');
+}
+
+function setLoading(on) {
+  const btn  = document.getElementById('search-btn');
+  const icon = document.getElementById('search-btn-icon');
+  const text = document.getElementById('search-btn-text');
+  btn.disabled = on;
+  icon.textContent = on ? '' : '⌕';
+  text.textContent = on ? 'Searching…' : 'Search';
+}
+
+// ── Render results ────────────────────────────────────────────
+function renderResults(data) {
+  showState('results');
+  document.getElementById('results-content').classList.remove('hidden');
+
+  const countEl = document.getElementById('results-count');
+  countEl.innerHTML = `<strong>${data.count}</strong> chunk${data.count !== 1 ? 's' : ''} retrieved`;
+  if (data.rerank_used)  countEl.innerHTML += ' · re-ranked';
+  if (data.extract_used) countEl.innerHTML += ' · extracted';
+
+  // Contradiction banner
+  const cd = data.contradiction_detection;
+  if (cd && cd.contradictions_found && cd.contradictions.length) {
+    const c = cd.contradictions[0];
+    document.getElementById('cb-title').textContent =
+      `Conflicting precedents: ${c.legal_question || 'same legal question'}`;
+    document.getElementById('cb-text').textContent =
+      `${c.case_1 || ''} vs ${c.case_2 || ''}${c.overruled ? ' — overruling relationship' : ''}`;
+    document.getElementById('contradiction-banner').classList.add('visible');
+    renderContradictions(data.contradiction_detection);
+  }
+
+  // Results list
+  const list = document.getElementById('results-list');
+  list.innerHTML = '';
+  data.results.forEach((r, i) => { list.appendChild(makeResultCard(r, i)); });
+
+  // Answer
+  if (data.generated && data.generated.answer) {
+    renderAnswer(data.generated);
+    document.getElementById('open-answer-btn').style.display = 'block';
+  }
+
+  // Strategy
+  if (data.strategy && data.strategy.strength_assessment) {
+    renderStrategy(data.strategy);
+    document.getElementById('open-strategy-btn').style.display = 'block';
+    openDrawer();
+    openDrawerTab(data.strategy ? 'strategy' : 'answer');
+  } else if (data.generated && data.generated.answer) {
+    openDrawer();
+    openDrawerTab('answer');
+  }
+}
+
+function makeResultCard(r, idx) {
+  const card = document.createElement('div');
+  card.className = 'result-card';
+
+  // Score bar fill width (normalise: rerank -10 to +10 → 0-100%, rrf 0-0.033)
+  let scoreNorm, scoreLabel, scoreVal;
+  if (r.rerank_score != null) {
+    scoreNorm  = Math.min(100, Math.max(0, ((r.rerank_score + 10) / 20) * 100));
+    scoreLabel = 'rerank';
+    scoreVal   = r.rerank_score.toFixed(2);
+  } else {
+    scoreNorm  = Math.min(100, (r.score / 0.033) * 100);
+    scoreLabel = 'rrf';
+    scoreVal   = r.score.toFixed(4);
+  }
+
+  const outcomeCls = r.outcome?.toLowerCase().includes('dismiss') ? 'pill-outcome-d'
+                   : r.outcome?.toLowerCase().includes('allow')   ? 'pill-outcome-a'
+                   : 'pill-outcome';
+
+  const inBoth = r.in_both ?
+    `<span class="in-both-badge">Both pipelines</span>` : '';
+
+  card.innerHTML = `
+    <div class="result-card-head" onclick="toggleCard(this.closest('.result-card'))">
+      <div class="result-rank">${idx + 1}</div>
+      <div class="result-info">
+        <div class="result-case">${r.case_name || 'Unknown Case'}</div>
+        <div class="result-meta">
+          <span class="meta-pill pill-domain">${r.legal_domain || '—'}</span>
+          <span class="meta-pill pill-year">${r.year || '—'}</span>
+          ${r.bench_type ? `<span class="meta-pill pill-bench">${r.bench_type}</span>` : ''}
+          ${r.outcome    ? `<span class="meta-pill ${outcomeCls}">${r.outcome}</span>` : ''}
+          ${inBoth}
+        </div>
+      </div>
+      <div class="result-scores">
+        <div class="score-bar-wrap">
+          <span class="score-label">${scoreLabel}</span>
+          <span class="score-val">${scoreVal}</span>
+        </div>
+        <div class="score-track">
+          <div class="score-fill" style="width:${scoreNorm.toFixed(1)}%"></div>
+        </div>
+        ${r.semantic_score != null ? `<div class="score-bar-wrap"><span class="score-label">sem</span><span class="score-val" style="font-size:10px">${r.semantic_score?.toFixed(3)}</span></div>` : ''}
+      </div>
+    </div>
+    <div class="result-card-body">
+      <div class="chunk-text">${escHtml(r.text || '')}</div>
+      ${renderExtraction(r.extraction)}
+    </div>`;
+
+  return card;
+}
+
+function renderExtraction(ext) {
+  if (!ext) return '';
+  const fields = [
+    ['petitioner_arguments', 'Petitioner argued'],
+    ['respondent_arguments', 'Respondent argued'],
+    ['court_reasoning',      'Court reasoning'],
+    ['legal_principles',     'Legal principles'],
+    ['decision',             'Decision'],
+    ['key_facts',            'Key facts'],
+  ];
+  const cards = fields
+    .filter(([k]) => ext[k]?.trim())
+    .map(([k, label]) => `
+      <div class="ext-card">
+        <div class="ext-card-label">${label}</div>
+        <div class="ext-card-text">${escHtml(ext[k])}</div>
+      </div>`).join('');
+  return cards ? `<div class="extraction-grid">${cards}</div>` : '';
+}
+
+function toggleCard(card) {
+  card.classList.toggle('expanded');
+}
+
+// ── Answer ────────────────────────────────────────────────────
+function renderAnswer(gen) {
+  document.getElementById('answer-empty').classList.add('hidden');
+  document.getElementById('answer-content').classList.remove('hidden');
+
+  document.getElementById('answer-text').innerHTML =
+    escHtml(gen.answer || '').replace(/\n/g, '<br>');
+
+  const conf = (gen.confidence || '').toUpperCase();
+  const confEl = document.getElementById('answer-confidence');
+  if (conf) {
+    const cls = conf === 'HIGH' ? 'conf-high' : conf === 'MEDIUM' ? 'conf-med' : 'conf-low';
+    confEl.innerHTML = `<span class="confidence-badge ${cls}">${conf} confidence</span>`;
+  }
+
+  if (gen.contradictions && gen.contradictions.trim() && gen.contradictions !== 'None detected.') {
+    document.getElementById('contradictions-in-answer').style.display = 'block';
+    document.getElementById('answer-contradictions-text').innerHTML =
+      escHtml(gen.contradictions).replace(/\n/g, '<br>');
+  }
+
+  if (gen.key_legal_principles) {
+    document.getElementById('answer-principles').innerHTML =
+      escHtml(gen.key_legal_principles).replace(/\n/g, '<br>');
+  }
+
+  // Sources
+  if (gen.sources && gen.sources.length) {
+    document.getElementById('sources-empty').classList.add('hidden');
+    document.getElementById('sources-content').classList.remove('hidden');
+    const list = document.getElementById('sources-list');
+    list.innerHTML = gen.sources.map(s => `
+      <div class="source-item">
+        <div class="source-num">[${s.excerpt_num}]</div>
+        <div class="source-info">
+          <div class="source-case">${escHtml(s.case_name || '')}</div>
+          <div class="source-meta">${s.citation || ''} · chunk #${s.chunk_num} · score ${(s.score||0).toFixed(4)}</div>
+        </div>
+      </div>`).join('');
+  }
+}
+
+// ── Strategy ──────────────────────────────────────────────────
+function renderStrategy(st) {
+  document.getElementById('strategy-empty').classList.add('hidden');
+  document.getElementById('strategy-content').classList.remove('hidden');
+
+  const str = (st.strength_assessment || '').toUpperCase();
+  const cls = str.includes('STRONG') ? 'str-strong'
+            : str.includes('WEAK')   ? 'str-weak' : 'str-moderate';
+  document.getElementById('strength-badge-wrap').innerHTML =
+    `<span class="strength-badge ${cls}">${str}</span>`;
+
+  const set = (id, val) => {
+    if (val) document.getElementById(id).innerHTML = escHtml(val).replace(/\n/g, '<br>');
+  };
+  set('s-situation',   st.situation_summary);
+  set('s-winning',     st.winning_arguments);
+  set('s-failure',     st.failure_patterns);
+  set('s-factors',     st.key_decisive_factors);
+  set('s-recommended', st.recommended_strategy);
+  set('s-risks',       st.risk_factors);
+}
+
+// ── Contradictions ────────────────────────────────────────────
+function renderContradictions(cd) {
+  if (!cd) return;
+  document.getElementById('contradictions-empty').classList.add('hidden');
+  document.getElementById('contradictions-content').classList.remove('hidden');
+
+  const list = document.getElementById('contradictions-list');
+  list.innerHTML = (cd.contradictions || []).map(c => `
+    <div class="contradiction-item">
+      <div class="ci-question">${escHtml(c.legal_question || '')}</div>
+      <div class="ci-row">
+        <div class="ci-case-label">Case 1</div>
+        <div class="ci-case-text"><strong>${escHtml(c.case_1||'')}</strong> — ${escHtml(c.case_1_position||'')}</div>
+      </div>
+      <div class="ci-row">
+        <div class="ci-case-label">Case 2</div>
+        <div class="ci-case-text"><strong>${escHtml(c.case_2||'')}</strong> — ${escHtml(c.case_2_position||'')}</div>
+      </div>
+      ${c.overruled ? '<span class="ci-overruled">Overruled</span>' : ''}
+    </div>`).join('');
+
+  document.getElementById('contradiction-note').textContent = cd.analysis_note || '';
+}
+
+// ── Drawer ────────────────────────────────────────────────────
+function openDrawer() {
+  document.getElementById('drawer').classList.add('open');
+  document.getElementById('drawer-overlay').classList.add('open');
+}
+function closeDrawer() {
+  document.getElementById('drawer').classList.remove('open');
+  document.getElementById('drawer-overlay').classList.remove('open');
+}
+function openDrawerTab(tab) {
+  openDrawer();
+  document.querySelectorAll('.drawer-tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.drawer-panel').forEach(p => p.classList.remove('active'));
+  document.getElementById('dtab-' + tab).classList.add('active');
+  document.getElementById('dpanel-' + tab).classList.add('active');
+
+  if (tab === 'health')   loadHealth();
+  if (tab === 'history')  loadHistory();
+  if (tab === 'cases')    loadCases();
+}
+
+function resetDrawerPanels() {
+  // Reset answer
+  document.getElementById('answer-empty').classList.remove('hidden');
+  document.getElementById('answer-content').classList.add('hidden');
+  document.getElementById('contradictions-in-answer').style.display = 'none';
+  document.getElementById('answer-confidence').innerHTML = '';
+  document.getElementById('answer-principles').innerHTML = '';
+  // Reset strategy
+  document.getElementById('strategy-empty').classList.remove('hidden');
+  document.getElementById('strategy-content').classList.add('hidden');
+  // Reset contradictions
+  document.getElementById('contradictions-empty').classList.remove('hidden');
+  document.getElementById('contradictions-content').classList.add('hidden');
+  // Reset sources
+  document.getElementById('sources-empty').classList.remove('hidden');
+  document.getElementById('sources-content').classList.add('hidden');
+}
+
+// ── Health ────────────────────────────────────────────────────
+async function loadHealth() {
+  try {
+    const res  = await fetch(`${API}/health`);
+    const data = await res.json();
+
+    const dot   = document.getElementById('health-dot');
+    const label = document.getElementById('health-label');
+    if (data.overall === 'healthy') {
+      dot.className = 'health-dot ok'; label.textContent = 'All systems ok';
+    } else {
+      dot.className = 'health-dot warn'; label.textContent = 'Degraded';
+    }
+
+    const s = data.statistics || {};
+    document.getElementById('health-empty').classList.add('hidden');
+    document.getElementById('health-content').classList.remove('hidden');
+    document.getElementById('health-content').innerHTML = `
+      <div class="health-grid">
+        <div class="health-card">
+          <div class="health-card-label">Chunks indexed</div>
+          <div class="health-card-val hc-ok">${data.components?.chromadb?.total_chunks ?? '—'}</div>
+        </div>
+        <div class="health-card">
+          <div class="health-card-label">Total requests</div>
+          <div class="health-card-val">${s.total_requests ?? 0}</div>
+        </div>
+        <div class="health-card">
+          <div class="health-card-label">Error rate</div>
+          <div class="health-card-val ${(s.error_rate||0) > 0.1 ? 'hc-err' : 'hc-ok'}">
+            ${((s.error_rate||0)*100).toFixed(1)}%
+          </div>
+        </div>
+        <div class="health-card">
+          <div class="health-card-label">Avg response</div>
+          <div class="health-card-val">${s.avg_response_ms ?? 0}ms</div>
+        </div>
+      </div>
+      <div class="strategy-section">
+        <div class="strategy-section-title">Component status</div>
+        ${Object.entries(data.components||{}).map(([k,v]) =>
+          `<div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid var(--border);font-size:12px">
+            <span>${k}</span>
+            <span style="color:${v.status==='ok'||v.status==='cached'?'var(--green)':'var(--amber)'}">
+              ${v.status}${v.total_chunks?' · '+v.total_chunks+' chunks':''}${v.size_kb?' · '+v.size_kb+'KB':''}
+            </span>
+          </div>`).join('')}
+      </div>
+      ${(s.top_queries||[]).length ? `
+      <div class="strategy-section" style="margin-top:12px">
+        <div class="strategy-section-title">Top queries</div>
+        ${s.top_queries.map(q =>
+          `<div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid var(--border);font-size:12px">
+            <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:280px">${escHtml(q.query)}</span>
+            <span style="color:var(--muted);flex-shrink:0;margin-left:8px">×${q.count}</span>
+          </div>`).join('')}
+      </div>` : ''}`;
+
+  } catch(e) {
+    document.getElementById('health-empty').querySelector('.state-desc').textContent =
+      'Could not reach server.';
+  }
+}
+
+async function openHealth() {
+  openDrawerTab('health');
+}
+
+// ── History ───────────────────────────────────────────────────
+async function loadHistory() {
+  try {
+    const res  = await fetch(`${API}/history?limit=30`);
+    const data = await res.json();
+    const el   = document.getElementById('history-drawer-content');
+
+    if (!data.entries?.length) {
+      el.innerHTML = '<div class="state-panel" style="min-height:80px"><div class="state-desc">No searches yet.</div></div>';
+      return;
+    }
+
+    el.innerHTML = data.entries.map(e => {
+      const flagBadges = [
+        e.rerank_used     && '<span class="hdi-flag">rerank</span>',
+        e.extract_used    && '<span class="hdi-flag">extract</span>',
+        e.contradictions  && '<span class="hdi-flag">contradictions</span>',
+        e.generate_used   && '<span class="hdi-flag">generate</span>',
+        e.strategize_used && '<span class="hdi-flag">strategize</span>',
+      ].filter(Boolean).join('');
+      const t = new Date(e.timestamp+'Z').toLocaleString();
+      return `
+        <div class="history-drawer-item" onclick="reuseQuery('${escAttr(e.query)}')">
+          <div class="hdi-query">${escHtml(e.query)}</div>
+          <div class="hdi-meta">
+            <span>${t}</span>
+            <span>${e.response_time_ms}ms</span>
+            ${e.had_error ? '<span style="color:var(--red)">error</span>' : ''}
+            ${flagBadges}
+          </div>
+        </div>`;
+    }).join('');
+
+    // Also populate sidebar history
+    populateSidebarHistory(data.entries.slice(0, 5));
+
+  } catch(e) {
+    document.getElementById('history-drawer-content').innerHTML =
+      '<div class="state-panel" style="min-height:80px"><div class="state-desc">Could not load history.</div></div>';
+  }
+}
+
+async function openHistory() { openDrawerTab('history'); }
+
+function populateSidebarHistory(entries) {
+  const el = document.getElementById('sidebar-history');
+  if (!entries.length) return;
+  el.innerHTML = entries.map(e => `
+    <div class="history-item" onclick="reuseQuery('${escAttr(e.query)}')">
+      <div class="history-q">${escHtml(e.query)}</div>
+      <div class="history-meta">${e.response_time_ms}ms · ${e.result_count} results</div>
+    </div>`).join('');
+}
+
+function addToSidebarHistory(query, data) {
+  const el = document.getElementById('sidebar-history');
+  const empty = el.querySelector('.sidebar-empty');
+  if (empty) empty.remove();
+
+  const item = document.createElement('div');
+  item.className = 'history-item';
+  item.onclick   = () => reuseQuery(query);
+  item.innerHTML = `
+    <div class="history-q">${escHtml(query)}</div>
+    <div class="history-meta">${data.count} results</div>`;
+  el.insertBefore(item, el.firstChild);
+
+  // Keep max 5
+  while (el.children.length > 5) el.removeChild(el.lastChild);
+}
+
+function reuseQuery(q) {
+  document.getElementById('query-input').value = q;
+  closeDrawer();
+  doSearch();
+}
+
+// ── Cases ─────────────────────────────────────────────────────
+async function loadCases() {
+  try {
+    const res  = await fetch(`${API}/cases`);
+    const data = await res.json();
+    const el   = document.getElementById('cases-drawer-content');
+
+    if (!data.cases?.length) {
+      el.innerHTML = '<div class="state-panel" style="min-height:80px"><div class="state-desc">No cases indexed yet.</div></div>';
+      return;
+    }
+
+    el.innerHTML = data.cases.map(c => `
+      <div style="padding:10px 0;border-bottom:1px solid var(--border)">
+        <div style="font-family:var(--serif);font-size:15px;font-weight:600;margin-bottom:4px">${escHtml(c.case_name)}</div>
+        <div style="font-size:11.5px;color:var(--muted);margin-bottom:4px">${c.citation} · ${c.year}</div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap">
+          <span class="meta-pill pill-domain">${c.legal_domain}</span>
+          <span class="meta-pill pill-bench">${c.bench_type}</span>
+          <span class="meta-pill ${c.outcome?.includes('dismiss')?'pill-outcome-d':c.outcome?.includes('allow')?'pill-outcome-a':'pill-outcome'}">${c.outcome}</span>
+        </div>
+      </div>`).join('');
+  } catch(e) {
+    document.getElementById('cases-drawer-content').innerHTML =
+      '<div class="state-panel" style="min-height:80px"><div class="state-desc">Could not load cases.</div></div>';
+  }
+}
+
+async function openCases() { openDrawerTab('cases'); }
+
+// ── State helpers ─────────────────────────────────────────────
+function showState(state) {
+  ['empty','loading','error','results'].forEach(s => {
+    const el = document.getElementById('state-' + s);
+    if (el) el.classList.toggle('hidden', s !== state);
+  });
+}
+
+function hideContradictionBanner() {
+  document.getElementById('contradiction-banner').classList.remove('visible');
+}
+
+// ── Utils ─────────────────────────────────────────────────────
+function escHtml(str) {
+  return String(str||'')
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;');
+}
+function escAttr(str) {
+  return String(str||'').replace(/'/g,'&#39;').replace(/"/g,'&quot;');
+}
+
+// ── Init ──────────────────────────────────────────────────────
+(async function init() {
+  // Ping health on load
+  try {
+    const res  = await fetch(`${API}/health`);
+    const data = await res.json();
+    const dot  = document.getElementById('health-dot');
+    const lbl  = document.getElementById('health-label');
+    if (data.overall === 'healthy') {
+      dot.className = 'health-dot ok';
+      lbl.textContent = `${data.components?.chromadb?.total_chunks ?? '?'} chunks indexed`;
+    } else {
+      dot.className = 'health-dot warn';
+      lbl.textContent = 'Degraded';
+    }
+  } catch(e) {
+    document.getElementById('health-dot').className = 'health-dot err';
+    document.getElementById('health-label').textContent = 'Server offline';
+  }
+
+  // Load history into sidebar
+  try {
+    const res  = await fetch(`${API}/history?limit=5`);
+    const data = await res.json();
+    if (data.entries?.length) populateSidebarHistory(data.entries);
+  } catch(e) { /* silent */ }
+})();
+</script>
+</body>
+</html>

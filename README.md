@@ -1138,6 +1138,47 @@ GET /history?limit=20&offset=0&query=detention&errors_only=false
 - SQLite will not scale past a single server — migrate to PostgreSQL
   in V14 when deploying to cloud
 
+## V11 - Frontend UI
+
+### What it does
+A complete single-file frontend (ui/index.html) built in plain HTML,
+CSS, and JavaScript that connects to the Flask API on localhost:5000.
+Designed as a legal research workstation — dense, scannable, and
+purposeful rather than a consumer search interface.
+
+### Features
+- **Three-panel layout** — filters sidebar, results centre, sliding
+  right drawer for generated content
+- **All pipeline flags exposed** — toggle re-rank, extract,
+  contradictions, generate, strategize independently from the sidebar
+- **Result cards** — case name (Crimson Pro serif), domain/year/bench/
+  outcome pills, score bars showing rerank and semantic scores,
+  expandable chunk text with extraction grid
+- **Right drawer** — seven tabs: Answer, Strategy, Conflicts, Sources,
+  Health, History, Cases. Slides in automatically after search
+- **Contradiction banner** — red alert band appears across the results
+  area when cross-case conflicts are detected, with a link to the
+  Conflicts tab
+- **Health pill** — live component status in the top bar, shows chunk
+  count on load
+- **History tab** — past queries with flags used and response time,
+  click any entry to re-run it
+- **Sidebar recent searches** — last 5 queries always visible
+
+### Design decisions
+- Crimson Pro (serif) for case names and answer text — legal document
+  feel without feeling archaic
+- Inter (sans-serif) for all UI chrome and labels
+- Navy (#1E2A3A) + cool slate palette — professional, not warm/terracotta
+- No decorative cards or shadows — borders and whitespace carry structure
+- CORS enabled on Flask via flask-cors so the file opens directly from
+  disk without a frontend server
+
+### Known issue fixed post-launch
+Markdown asterisks (**bold**, *italic*) from LLM output rendered as
+raw text. Fixed by adding a renderMarkdown() helper that converts
+**text** → <strong> and *text* → <em> before inserting into the DOM.
+
 ## Roadmap
 
 | Version | Focus | Status |
@@ -1152,8 +1193,8 @@ GET /history?limit=20&offset=0&query=detention&errors_only=false
 | V8 | Legal strategy intelligence - synthesis | Done |
 | V9 | Evaluation framework - precision, recall, faithfulness | Done |
 | V10 | Production foundations - logging, history, health | Done |
-| V11 | Frontend UI - HTML/CSS/JS interface | Next |
-| V12 | Framework integration - LangChain, LlamaIndex, LangGraph | Planned |
+| V11 | Frontend UI - HTML/CSS/JS interface | Done |
+| V12 | Framework integration - LangChain, LlamaIndex, LangGraph | Next |
 | V13 | Authentication and rate limiting | Planned |
 | V14 | Deployment - cloud hosting, cloud vector database | Planned |
 

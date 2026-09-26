@@ -982,6 +982,162 @@ Body: {
 - No query history — users cannot revisit previous searches
 - The system is not yet deployable — runs only on localhost
 
+## V10 - Production Foundations
+
+### What it does
+Adds the operational infrastructure that makes the system maintainable
+and observable. Every search request is logged to a SQLite database
+with full metadata — query, flags used, response time, retrieved cases,
+error status. A query history endpoint exposes the log with filtering
+and pagination. A comprehensive health endpoint checks all system
+components and returns usage statistics. The system can now answer
+"what are users searching for?", "how fast is it?", and "is anything
+broken?" — questions that were previously unanswerable.
+
+### New features
+- **database.py** - new file, SQLite logging with init_db(),
+  log_request(), get_history(), get_stats()
+- **GET /health** - checks ChromaDB, BM25 index, log database,
+  reranker model cache; returns component status + usage statistics
+  + indexed case list
+- **GET /history** - paginated query history with optional filters
+  (?query=detention, ?errors_only=true, ?limit=20&offset=0)
+- **Request logging** - every /search request logged in a try/finally
+  block so logging always runs whether the request succeeds or fails
+- **Usage statistics** - total requests, error rate, average response
+  time, top queries, top retrieved cases, flag usage counts,
+  requests today
+- **overall_health signal** - "healthy" or "degraded — [reason]"
+  based on component checks
+
+### Why SQLite over log files
+Log files are write-only. To find the most common queries you'd grep
+through text. SQLite gives you SELECT query, COUNT(*) GROUP BY query
+ORDER BY COUNT for free. Filtering, pagination, and aggregation are
+built in. For a single-server deployment SQLite is the correct choice —
+zero configuration, file-based, always available. A multi-server
+deployment (V14) would switch to PostgreSQL (Supabase free tier).
+
+### What gets logged per request
+
+timestamp : UTC ISO format
+query : exact query string
+top_k : number of results requested
+rerank_used : bool
+extract_used : bool
+contradictions : bool
+generate_used : bool
+strategize_used : bool
+filters : JSON dict of applied filters
+retrieved_cases : JSON list of source_file strings
+result_count : number of chunks returned
+response_time_ms : end-to-end latency in milliseconds
+had_error : bool
+error_message : error string if had_error=True
+
+
+### The try/finally logging pattern
+```python
+start_time = time.time()
+try:
+    # all pipeline steps
+    ...
+except Exception as e:
+    had_error = True
+    error_message = str(e)
+finally:
+    # ALWAYS runs — success or failure
+    log_request(
+        response_time_ms = int((time.time() - start_time) * 1000),
+        had_error        = had_error,
+        ...
+    )
+```
+The finally block guarantees logging even when the pipeline crashes
+mid-request. Failed requests are the most valuable debugging signal
+— a pattern of errors on specific query types is something you'd
+never see if you only logged successes.
+
+### Actual logged results
+
+Total requests : 3
+Total errors : 0
+Error rate : 0.0
+Avg response ms : 1587
+Requests today : 3
+Top query : "preventive detention Article 22" (1 time)
+Components : all ok
+ChromaDB : 577 chunks
+BM25 index : 1337 KB
+Log database : initialised
+Reranker model : cached
+
+
+### New endpoints
+
+GET /health
+→ {
+"version": "V10",
+"components": {
+"chromadb" : {"status": "ok", "total_chunks": 577},
+"bm25_index" : {"status": "ok", "size_kb": 1337},
+"log_database" : {"status": "ok", "size_kb": 12},
+"reranker_model" : {"status": "cached"}
+},
+"statistics": {
+"total_requests": 3,
+"error_rate": 0.0,
+"avg_response_ms": 1587,
+"top_queries": [...],
+"flag_usage": {...}
+},
+"indexed_cases": [...],
+"overall": "healthy"
+}
+
+GET /history?limit=20&offset=0&query=detention&errors_only=false
+→ {
+"total": 1,
+"entries": [
+{
+"id": 1,
+"timestamp": "2026-...",
+"query": "preventive detention Article 22",
+"rerank_used": true,
+"response_time_ms": 1102,
+"retrieved_cases": ["A_K_Gopalan_vs_...PDF"],
+"had_error": false
+}
+]
+}
+
+
+### Key concepts learned
+- **Observability is a production requirement:** a system you cannot
+  observe is a system you cannot maintain. Logging, health checks,
+  and statistics are not optional features — they are the difference
+  between a demo and a deployable system
+- **Log failures, not just successes:** error patterns (specific queries
+  always failing, rate limit clusters at certain times) are invisible
+  if you only log successful requests
+- **try/finally for guaranteed execution:** finally blocks run whether
+  the try block succeeded or raised an exception. The correct pattern
+  for any cleanup or logging that must always happen
+- **SQLite for single-server logging:** zero configuration, file-based,
+  always available. The right tool for this scale. PostgreSQL becomes
+  the right tool when you scale to multiple servers in V14
+- **Separate /health from /status:** /status is a one-line liveness
+  check (is the server up?). /health is a comprehensive readiness
+  check (are all components working and what is the usage pattern?)
+
+### Limitations — deferred to later versions
+- No authentication — any client with the URL can query the system
+  (addressed in V13)
+- No rate limiting — a single client can exhaust API quotas
+  (addressed in V13)
+- SQLite will not scale past a single server — migrate to PostgreSQL
+  in V14 when deploying to cloud
+
 ## Roadmap
 
 | Version | Focus | Status |
@@ -995,7 +1151,11 @@ Body: {
 | V7 | Contradiction detection - conflicting judgments | Done |
 | V8 | Legal strategy intelligence - synthesis | Done |
 | V9 | Evaluation framework - precision, recall, faithfulness | Done |
-| V10 | Production architecture - auth, logging, monitoring | Next |
+| V10 | Production foundations - logging, history, health | Done |
+| V11 | Frontend UI - HTML/CSS/JS interface | Next |
+| V12 | Framework integration - LangChain, LlamaIndex, LangGraph | Planned |
+| V13 | Authentication and rate limiting | Planned |
+| V14 | Deployment - cloud hosting, cloud vector database | Planned |
 
 ---
 

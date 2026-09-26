@@ -1235,8 +1235,7 @@ function renderAnswer(gen) {
   document.getElementById('answer-empty').classList.add('hidden');
   document.getElementById('answer-content').classList.remove('hidden');
 
-  document.getElementById('answer-text').innerHTML =
-    escHtml(gen.answer || '').replace(/\n/g, '<br>');
+  document.getElementById('answer-text').innerHTML = renderMarkdown(gen.answer || '');
 
   const conf = (gen.confidence || '').toUpperCase();
   const confEl = document.getElementById('answer-confidence');
@@ -1284,7 +1283,7 @@ function renderStrategy(st) {
     `<span class="strength-badge ${cls}">${str}</span>`;
 
   const set = (id, val) => {
-    if (val) document.getElementById(id).innerHTML = escHtml(val).replace(/\n/g, '<br>');
+    if (val) document.getElementById(id).innerHTML = renderMarkdown(val);
   };
   set('s-situation',   st.situation_summary);
   set('s-winning',     st.winning_arguments);
@@ -1550,6 +1549,14 @@ function escHtml(str) {
     .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
     .replace(/"/g,'&quot;');
 }
+
+function renderMarkdown(str) {
+  return escHtml(str)
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/\*(.+?)\*/g, '<em>$1</em>')
+    .replace(/\n/g, '<br>');
+}
+
 function escAttr(str) {
   return String(str||'').replace(/'/g,'&#39;').replace(/"/g,'&quot;');
 }

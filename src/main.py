@@ -6,6 +6,7 @@ import sys
 import time
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
+from flask_cors import CORS
 
 load_dotenv()
 sys.path.insert(0, os.path.dirname(__file__))
@@ -20,6 +21,7 @@ from evaluator    import evaluate_pipeline, TEST_CASES
 from database     import init_db, log_request, get_history, get_stats
 
 app = Flask(__name__)
+CORS(app)
 
 # Initialise database on startup
 init_db()

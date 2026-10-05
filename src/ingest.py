@@ -1,10 +1,5 @@
 # src/ingest.py
-# V11 — large-scale ingestion support
-# Changes:
-#   - PDF_DIR configurable via --year argument or SOURCE_DIR env var
-#   - Daily RPD counter with automatic pause at 950 requests
-#   - Checkpoint file for crash recovery without ChromaDB lookups
-#   - Progress summary at end showing estimated days remaining
+# Large-scale ingestion with key rotation, checkpoint, and strict error handling
 
 import os
 import sys
@@ -16,32 +11,61 @@ import chromadb
 from google import genai
 from google.genai import types
 from dotenv import load_dotenv
-from metadata import extract_metadata
+from metadata import extract_metadata_strict
 
 load_dotenv()
-gemini_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
 # ── Constants ─────────────────────────────────────────────────
-BASE_DATASET_DIR = os.path.join("legal_dataset", "supreme_court_judgements")
+BASE_DATASET_DIR = os.path.join("legal_dataset", "supreme_court_judgments")
 CHROMA_PATH      = "storage/chroma_db"
 COLLECTION       = "legal_cases"
 CHUNK_SIZE       = 400
 OVERLAP          = 50
 EMBED_MODEL      = "gemini-embedding-001"
 BATCH_SIZE       = 25
-
-# RPD safety limit — stop at 950 to leave headroom
-# (Gemini free tier: 1000 RPD)
 RPD_LIMIT        = 950
-
-# Checkpoint file — tracks which files have been successfully ingested
-# Faster than querying ChromaDB for every file
 CHECKPOINT_FILE  = "storage/ingestion_checkpoint.json"
 
 
-# ── Checkpoint management ──────────────────────────────────────
+# ── Gemini key rotation ───────────────────────────────────────
+def load_api_keys() -> list[str]:
+    keys = []
+    i = 1
+    while True:
+        key = os.getenv(f"GEMINI_API_KEY_{i}")
+        if not key:
+            break
+        keys.append(key)
+        i += 1
+    if not keys:
+        fallback = os.getenv("GEMINI_API_KEY")
+        if fallback:
+            keys.append(fallback)
+    if not keys:
+        raise RuntimeError("No Gemini API keys found in .env")
+    print(f"  Loaded {len(keys)} Gemini key(s)")
+    return keys
+
+
+API_KEYS        = load_api_keys()
+current_key_idx = [0]
+
+
+def get_client():
+    return genai.Client(api_key=API_KEYS[current_key_idx[0]])
+
+
+def rotate_gemini_key() -> bool:
+    next_idx = current_key_idx[0] + 1
+    if next_idx >= len(API_KEYS):
+        return False
+    current_key_idx[0] = next_idx
+    print(f"\n  🔑 Switching to Gemini key {next_idx + 1}/{len(API_KEYS)}")
+    return True
+
+
+# ── Checkpoint ────────────────────────────────────────────────
 def load_checkpoint() -> set:
-    """Load set of already-ingested filenames from checkpoint file."""
     if not os.path.exists(CHECKPOINT_FILE):
         return set()
     try:
@@ -53,7 +77,6 @@ def load_checkpoint() -> set:
 
 
 def save_checkpoint(ingested: set):
-    """Save checkpoint to disk after each successful file."""
     os.makedirs(os.path.dirname(CHECKPOINT_FILE), exist_ok=True)
     with open(CHECKPOINT_FILE, "w") as f:
         json.dump({"ingested": list(ingested), "count": len(ingested)}, f)
@@ -65,9 +88,12 @@ def extract_text(pdf_path: str) -> str:
     try:
         with pdfplumber.open(pdf_path) as pdf:
             for page in pdf.pages:
-                t = page.extract_text()
-                if t:
-                    full_text += t + "\n"
+                try:
+                    t = page.extract_text()
+                    if t:
+                        full_text += t + "\n"
+                except Exception:
+                    continue   # skip bad pages, don't crash
     except Exception as e:
         print(f"  ⚠️  PDF read error: {e}")
     return full_text
@@ -88,24 +114,29 @@ def chunk_text(text: str) -> list[str]:
 # ── Chunks → embeddings ───────────────────────────────────────
 def embed_texts(texts: list[str], rpm_counter: list) -> list[list[float]]:
     """
-    Embed chunks with RPD tracking.
-    rpm_counter is a mutable list [current_count] shared across calls.
-    Returns empty list if RPD limit would be exceeded.
+    Returns:
+      list of vectors  → success
+      []               → RPD limit hit on all keys (stop ingestion)
+    Raises on unexpected errors.
     """
     all_vectors = []
 
     for i in range(0, len(texts), BATCH_SIZE):
-        # Check RPD before each batch
+        # Check RPD for current key
         if rpm_counter[0] >= RPD_LIMIT:
-            print(f"\n  🛑 Daily request limit reached ({RPD_LIMIT} requests).")
-            print(f"     Stopping ingestion. Run again tomorrow to continue.")
-            return []   # signal to stop
+            if rotate_gemini_key():
+                rpm_counter[0] = 0
+                print(f"  Continuing with new Gemini key...")
+            else:
+                print(f"\n  🛑 All Gemini keys exhausted for today.")
+                return []
 
         batch = texts[i : i + BATCH_SIZE]
 
         while True:
             try:
-                result = gemini_client.models.embed_content(
+                client = get_client()
+                result = client.models.embed_content(
                     model    = EMBED_MODEL,
                     contents = batch,
                     config   = types.EmbedContentConfig(
@@ -114,18 +145,33 @@ def embed_texts(texts: list[str], rpm_counter: list) -> list[list[float]]:
                 )
                 all_vectors.extend([e.values for e in result.embeddings])
                 rpm_counter[0] += 1
-                print(f"    embedded {min(i+BATCH_SIZE, len(texts))}/{len(texts)} "
-                      f"chunks [API calls today: {rpm_counter[0]}/{RPD_LIMIT}]",
-                      end="\r")
+                total_calls = rpm_counter[0] + current_key_idx[0] * RPD_LIMIT
+                print(
+                    f"    embedded {min(i+BATCH_SIZE, len(texts))}/{len(texts)} chunks "
+                    f"[key {current_key_idx[0]+1}, calls today: {rpm_counter[0]}/{RPD_LIMIT}, "
+                    f"total: {total_calls}]",
+                    end="\r"
+                )
                 time.sleep(2)
                 break
 
             except Exception as e:
-                if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
-                    print(f"\n  ⏳ Rate limit — waiting 60s...")
-                    time.sleep(60)
+                err = str(e)
+                if "429" in err or "RESOURCE_EXHAUSTED" in err:
+                    if any(x in err.lower() for x in ["day", "quota", "daily"]):
+                        # Daily quota hit — rotate key
+                        print(f"\n  ⚠️  Gemini daily quota hit")
+                        if rotate_gemini_key():
+                            rpm_counter[0] = 0
+                        else:
+                            print(f"  🛑 All Gemini keys exhausted.")
+                            return []
+                    else:
+                        # TPM hit — wait and retry
+                        print(f"\n  ⏳ Gemini TPM limit — waiting 60s...")
+                        time.sleep(60)
                 else:
-                    raise
+                    raise   # unexpected error — bubble up
 
     return all_vectors
 
@@ -141,30 +187,45 @@ def get_collection():
 
 # ── Ingest one PDF ────────────────────────────────────────────
 def ingest_pdf(pdf_path: str, collection, rpm_counter: list) -> int:
-    """Returns number of chunks added, or -1 if RPD limit hit."""
+    """
+    Returns:
+       N > 0  → N chunks added successfully
+       0      → file was empty or unreadable (skip, mark done)
+      -1      → Gemini RPD exhausted (stop ingestion)
+    Raises on metadata API errors (Groq quota exhausted).
+    """
     filename = os.path.basename(pdf_path)
 
+    # Extract text
     text = extract_text(pdf_path)
     if not text.strip():
-        print(f"  ⚠️  No text — skipping")
+        print(f"  ⚠️  No extractable text — skipping")
         return 0
 
-    # Metadata extraction (Qwen — separate rate limit, handled in metadata.py)
-    meta = extract_metadata(text, filename)
+    # Extract metadata — STRICT: raises on API errors
+    print(f"  ⏳ Extracting metadata...")
+    meta = extract_metadata_strict(text, filename)
+    print(f"  ✓ {meta['case_name'][:60]} | {meta['legal_domain']}")
 
+    # Chunk
     chunks = chunk_text(text)
     if not chunks:
         return 0
+    print(f"  ✓ {len(chunks)} chunks")
 
+    # Embed
+    print(f"  ⏳ Embedding...")
     vectors = embed_texts(chunks, rpm_counter)
+
     if not vectors:
-        return -1   # RPD limit hit — stop processing
+        return -1   # Gemini keys exhausted
 
     if len(vectors) != len(chunks):
-        # Partial embedding — RPD hit mid-file, skip this file
-        print(f"\n  ⚠️  Partial embedding — skipping file to maintain consistency")
+        # Partial result — keys exhausted mid-file
+        print(f"\n  ⚠️  Partial embedding — stopping to maintain consistency")
         return -1
 
+    # Store
     doc_id    = filename.replace(".pdf","").replace(".PDF","").replace(" ","_")
     ids       = [f"{doc_id}__chunk_{i}" for i in range(len(chunks))]
     metadatas = [meta.copy() for _ in chunks]
@@ -180,18 +241,12 @@ def ingest_pdf(pdf_path: str, collection, rpm_counter: list) -> int:
 
 # ── Main ──────────────────────────────────────────────────────
 def run_ingestion(year: str = None, source_dir: str = None):
-    """
-    Ingest PDFs from a year folder or a custom directory.
-
-    year       : "1950" → ingests from legal_dataset/.../1950/
-    source_dir : explicit path override (used for data/cases/ compatibility)
-    """
     if source_dir:
         pdf_dir = source_dir
     elif year:
         pdf_dir = os.path.join(BASE_DATASET_DIR, str(year))
     else:
-        pdf_dir = "data/cases"   # default fallback
+        pdf_dir = "data/cases"
 
     if not os.path.isdir(pdf_dir):
         print(f"Directory not found: {pdf_dir}")
@@ -209,39 +264,80 @@ def run_ingestion(year: str = None, source_dir: str = None):
     print(f"\n📂 Source     : {pdf_dir}")
     print(f"📄 Files found: {len(pdf_files)}")
 
-    collection    = get_collection()
-    ingested_set  = load_checkpoint()
-    rpm_counter   = [0]   # mutable — passed by reference
-    total_chunks  = 0
-    skipped       = 0
-    processed     = 0
-    limit_hit     = False
+    collection   = get_collection()
+    ingested_set = load_checkpoint()
+    rpm_counter  = [0]
+    total_chunks = 0
+    skipped      = 0
+    processed    = 0
+    limit_hit    = False
+
+    # Bootstrap checkpoint from ChromaDB on first run
+    if not ingested_set:
+        print("  Bootstrapping checkpoint from ChromaDB...")
+        all_ids = collection.get(include=[])["ids"]
+        for chunk_id in all_ids:
+            parts = chunk_id.rsplit("__chunk_", 1)
+            if len(parts) == 2:
+                doc_id = parts[0]
+                ingested_set.add(doc_id + ".PDF")
+                ingested_set.add(doc_id + ".pdf")
+        save_checkpoint(ingested_set)
+        print(f"  Bootstrapped {len(ingested_set)} entries from ChromaDB")
 
     for filename in pdf_files:
         path = os.path.join(pdf_dir, filename)
 
-        # Skip if already ingested (checkpoint)
+        # Skip if already done
         if filename in ingested_set:
+            skipped += 1
+            continue
+
+        # Also check ChromaDB directly (handles edge cases)
+        doc_id   = filename.replace(".pdf","").replace(".PDF","").replace(" ","_")
+        first_id = f"{doc_id}__chunk_0"
+        if collection.get(ids=[first_id])["ids"]:
+            ingested_set.add(filename)
+            save_checkpoint(ingested_set)
             skipped += 1
             continue
 
         print(f"\n📄 [{processed+1}] {filename[:70]}")
 
-        result = ingest_pdf(path, collection, rpm_counter)
+        try:
+            result = ingest_pdf(path, collection, rpm_counter)
+
+        except RuntimeError as e:
+            # Groq keys exhausted — hard stop
+            err = str(e)
+            print(f"\n  🛑 Metadata API exhausted: {err}")
+            print(f"     Add more GROQ_API_KEY_N keys to .env or wait until tomorrow.")
+            print(f"     Progress saved — run again to continue from here.")
+            limit_hit = True
+            break
+
+        except Exception as e:
+            # Unexpected error — skip file, continue
+            print(f"\n  ⚠️  Unexpected error: {e}")
+            print(f"     Skipping file and continuing...")
+            ingested_set.add(filename)
+            save_checkpoint(ingested_set)
+            continue
 
         if result == -1:
+            # Gemini keys exhausted
             limit_hit = True
-            print(f"\n  Daily limit reached. Progress saved.")
+            print(f"\n  🛑 Gemini embedding keys exhausted. Progress saved.")
             break
 
         if result > 0:
-            total_chunks   += result
+            total_chunks  += result
             ingested_set.add(filename)
             save_checkpoint(ingested_set)
-            processed      += 1
-            print(f"  ✓ {result} chunks | total indexed: {collection.count()}")
+            processed     += 1
+            print(f"\n  ✓ {result} chunks | total in index: {collection.count()}")
         else:
-            # Empty or unreadable file — mark as done so we skip next run
+            # Empty file — mark done, skip
             ingested_set.add(filename)
             save_checkpoint(ingested_set)
 
@@ -252,26 +348,28 @@ def run_ingestion(year: str = None, source_dir: str = None):
         build_and_save()
 
     # Summary
+    remaining = len(pdf_files) - skipped - processed
     print(f"\n{'═'*55}")
     print(f"  Session summary")
     print(f"  Files processed this run : {processed}")
     print(f"  Files skipped (done)     : {skipped}")
     print(f"  Chunks added this run    : {total_chunks}")
-    print(f"  Total chunks in index   : {collection.count()}")
+    print(f"  Total chunks in index    : {collection.count()}")
     print(f"  Total files ingested     : {len(ingested_set)}")
-    print(f"  API calls used today     : {rpm_counter[0]}/{RPD_LIMIT}")
+    print(f"  Gemini calls this run    : {rpm_counter[0]}")
     if limit_hit:
-        remaining = len(pdf_files) - skipped - processed
-        print(f"  Files remaining in year  : {remaining}")
-        print(f"  ⚠️  Run again tomorrow to continue")
+        print(f"  Files remaining          : {remaining}")
+        print(f"  ⚠️  Run again tomorrow (or with new keys) to continue")
+    else:
+        print(f"  ✅ Year complete")
     print(f"{'═'*55}\n")
 
 
 # ── Entry point ───────────────────────────────────────────────
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Legal RAG ingestion pipeline")
-    parser.add_argument("--year",  type=str, help="Year to ingest e.g. 1950")
-    parser.add_argument("--dir",   type=str, help="Custom directory path")
+    parser.add_argument("--year", type=str, help="Year folder to ingest e.g. 1950")
+    parser.add_argument("--dir",  type=str, help="Custom directory path")
     args = parser.parse_args()
 
     run_ingestion(year=args.year, source_dir=args.dir)

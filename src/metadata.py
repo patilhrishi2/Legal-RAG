@@ -3,14 +3,51 @@
 import os
 import re
 import json
+import time
 from groq import Groq
 from dotenv import load_dotenv
 
 load_dotenv()
-groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
-MODEL = "qwen/qwen3.8-27b"
+MODEL             = "qwen/qwen3.8-27b"
 HEADER_WORD_COUNT = 3000
+
+
+# ── Groq client rotation ──────────────────────────────────────
+def _load_groq_clients():
+    clients = []
+    i = 1
+    while True:
+        key = os.getenv(f"GROQ_API_KEY_{i}")
+        if not key:
+            break
+        clients.append(Groq(api_key=key))
+        i += 1
+    if not clients:
+        fallback = os.getenv("GROQ_API_KEY")
+        if fallback:
+            clients.append(Groq(api_key=fallback))
+    if not clients:
+        raise RuntimeError("No Groq API keys found in .env")
+    print(f"  Loaded {len(clients)} Groq key(s)")
+    return clients
+
+_groq_clients = _load_groq_clients()
+_groq_key_idx = [0]
+
+
+def _get_groq_client():
+    return _groq_clients[_groq_key_idx[0]]
+
+
+def _rotate_groq_key() -> bool:
+    next_idx = _groq_key_idx[0] + 1
+    if next_idx >= len(_groq_clients):
+        return False
+    _groq_key_idx[0] = next_idx
+    print(f"  🔑 Switching to Groq key {next_idx + 1}/{len(_groq_clients)}")
+    return True
+
 
 SYSTEM_PROMPT = """You are a legal metadata extractor for Supreme Court of India judgments.
 Return ONLY a valid JSON object. No markdown, no explanation, no code fences.
@@ -61,43 +98,26 @@ Judgment text:
 """
 
 
-HEADER_WORD_COUNT = 5000   # increase from 3000
-
+# ── Header extraction ─────────────────────────────────────────
 def extract_header(full_text: str) -> str:
-    """
-    Extract the most useful portion of the judgment for metadata extraction.
-
-    Problem with Indian Kanoon PDFs: the document header contains a large
-    CITATOR INFO block (hundreds of case references like 'F 1951 SC 157')
-    that consumes most of the word budget before the actual case content.
-
-    Fix: find where the citator block ends by looking for ACT: or HEADNOTE:
-    or JUDGMENT: markers, then take text from that point forward.
-    This ensures Groq sees the constitutional question, not just citations.
-    """
-    # Markers that signal the end of the citator block
-    # and the start of meaningful case content
     content_markers = [
         "ACT:", "HEADNOTE:", "JUDGMENT:", "HEAD NOTE:",
         "FACTS:", "HELD:", "The petitioner", "The appellant",
         "This is a petition", "This appeal"
     ]
-
     for marker in content_markers:
         idx = full_text.find(marker)
         if idx != -1:
-            # Take from 500 chars before the marker (to catch any preamble)
-            # through HEADER_WORD_COUNT words from that point
             start     = max(0, idx - 500)
             remainder = full_text[start:]
             words     = remainder.split()
             return " ".join(words[:HEADER_WORD_COUNT])
 
-    # Fallback: no marker found, just take first HEADER_WORD_COUNT words
     words = full_text.split()
     return " ".join(words[:HEADER_WORD_COUNT])
 
 
+# ── JSON parsing ──────────────────────────────────────────────
 def parse_json_from_response(text: str) -> dict:
     text = text.strip()
     text = re.sub(r"^```json\s*", "", text)
@@ -114,11 +134,10 @@ def parse_json_from_response(text: str) -> dict:
                 return json.loads(match.group())
             except json.JSONDecodeError:
                 pass
-
-    print("  ⚠️  Could not parse metadata JSON — using fallback")
     return {}
 
 
+# ── Validation ────────────────────────────────────────────────
 def get_fallback_metadata(source_file: str) -> dict:
     return {
         "case_name"      : "Unknown",
@@ -163,35 +182,70 @@ def validate_and_clean(raw: dict, source_file: str) -> dict:
     }
 
 
+# ── Standard extraction (silent fallback) ────────────────────
 def extract_metadata(full_text: str, source_file: str) -> dict:
-    header = extract_header(full_text)
-    prompt = USER_PROMPT_TEMPLATE.format(text=header)
-
+    """
+    Soft extraction — catches all errors and returns fallback.
+    Used by patch scripts and non-critical contexts.
+    """
     try:
-        response = groq_client.chat.completions.create(
-            model      = MODEL,
-            messages   = [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user",   "content": prompt}
-            ],
-            temperature = 0.0,
-            max_tokens  = 512,
-            reasoning_effort = "none",
-        )
-        raw_text = response.choices[0].message.content
-        raw_dict = parse_json_from_response(raw_text)
-
-        if not raw_dict:
-            return get_fallback_metadata(source_file)
-
-        return validate_and_clean(raw_dict, source_file)
-
+        return extract_metadata_strict(full_text, source_file)
     except Exception as e:
         print(f"  ⚠️  Metadata extraction failed: {e}")
         return get_fallback_metadata(source_file)
 
 
-# ── Quick test ────────────────────────────────────────────────
+# ── Strict extraction (raises on API errors) ──────────────────
+def extract_metadata_strict(full_text: str, source_file: str) -> dict:
+    """
+    Hard extraction — raises on API rate limits and quota errors.
+    Used by ingest.py so the pipeline stops rather than
+    silently storing Unknown metadata.
+    """
+    header = extract_header(full_text)
+    prompt = USER_PROMPT_TEMPLATE.format(text=header)
+
+    while True:
+        try:
+            response = _get_groq_client().chat.completions.create(
+                model            = MODEL,
+                messages         = [
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user",   "content": prompt},
+                ],
+                temperature      = 0.0,
+                max_tokens       = 512,
+                reasoning_effort = "none",
+            )
+            raw_text = response.choices[0].message.content
+            raw_dict = parse_json_from_response(raw_text)
+
+            if not raw_dict:
+                raise ValueError("Could not parse metadata JSON from response")
+
+            return validate_and_clean(raw_dict, source_file)
+
+        except Exception as e:
+            err = str(e)
+            if "429" in err or "rate_limit" in err.lower() or "RESOURCE_EXHAUSTED" in err:
+                if any(x in err.lower() for x in ["day", "1000", "rpd", "daily", "quota"]):
+                    # Daily limit hit — try rotating to next key
+                    if _rotate_groq_key():
+                        continue
+                    else:
+                        raise RuntimeError(
+                            f"All Groq keys exhausted for today: {err}"
+                        )
+                else:
+                    # TPM limit — wait and retry same key
+                    print(f"\n  ⏳ Groq TPM limit — waiting 30s...")
+                    time.sleep(30)
+                    continue
+            else:
+                raise
+
+
+# ── Test ──────────────────────────────────────────────────────
 if __name__ == "__main__":
     sample = """
     A.K. Gopalan vs The State Of Madras Union Of India on 19 May, 1950
@@ -199,11 +253,15 @@ if __name__ == "__main__":
     Bench: Kania, H.J. (CJ), Fazal Ali, Saiyid, Patanjali Sastri, M.,
            Mahajan, Mehr Chand, Das, Sudhi Ranjan, Mukherjea, B.K.
     ACT: Constitution of India - Articles 13, 19, 21, 22, 32;
-         Preventive Detention Act, 1950
-    HEADNOTE: The petitioner challenged the constitutional validity of the
-    Preventive Detention Act contending it violated Articles 19, 21 and 22.
+         Preventive Detention Act, 1950 - Sections 3, 7, 12, 14
+    HEADNOTE:
+    The petitioner, a communist leader, was detained under the Preventive
+    Detention Act, 1950. He challenged the constitutional validity of the
+    Act contending that it violated Articles 13, 19, 21 and 22 of the
+    Constitution of India...
     """
+    print("Testing metadata extraction...")
     result = extract_metadata(sample, "A_K_Gopalan_test.PDF")
-    print("\nExtracted metadata:")
-    for k, v in result.items():
-        print(f"  {k:<18} : {v}")
+    print("Extracted metadata:")
+    for key, val in result.items():
+        print(f"  {key:<18} : {val}")

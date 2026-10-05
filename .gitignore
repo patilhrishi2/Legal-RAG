@@ -8,3 +8,7 @@ legal_dataset.zip
 legal_dataset/
 unnecessary/
 patch_maneka.py
+test_raw_output.py
+test_raw_output.json
+test_metadata_models.py
+raw_gemma_output.txt

@@ -4,51 +4,29 @@ import os
 import re
 import json
 import time
-from groq import Groq
+import requests
 from dotenv import load_dotenv
 
 load_dotenv()
 
-MODEL             = "qwen/qwen3.8-27b"
+# ── Config ────────────────────────────────────────────────────
 HEADER_WORD_COUNT = 3000
+API_KEY           = os.getenv("GEMINI_API_KEY_1") or os.getenv("GEMINI_API_KEY")
+
+# Using REST API directly — more reliable for Gemini than the SDK
+# which has known issues with response.text returning None for non-Gemini models
+GEMINI_MODEL   = "gemini-3.5-flash-lite"
+GEMINI_API_URL = (
+    f"https://generativelanguage.googleapis.com/v1beta/models/"
+    f"{GEMINI_MODEL}:generateContent?key={API_KEY}"
+)
+
+# Set to True temporarily to log raw API responses for debugging
+DEBUG_LOG = True
+DEBUG_FILE = "storage/metadata_debug.json"
 
 
-# ── Groq client rotation ──────────────────────────────────────
-def _load_groq_clients():
-    clients = []
-    i = 1
-    while True:
-        key = os.getenv(f"GROQ_API_KEY_{i}")
-        if not key:
-            break
-        clients.append(Groq(api_key=key))
-        i += 1
-    if not clients:
-        fallback = os.getenv("GROQ_API_KEY")
-        if fallback:
-            clients.append(Groq(api_key=fallback))
-    if not clients:
-        raise RuntimeError("No Groq API keys found in .env")
-    print(f"  Loaded {len(clients)} Groq key(s)")
-    return clients
-
-_groq_clients = _load_groq_clients()
-_groq_key_idx = [0]
-
-
-def _get_groq_client():
-    return _groq_clients[_groq_key_idx[0]]
-
-
-def _rotate_groq_key() -> bool:
-    next_idx = _groq_key_idx[0] + 1
-    if next_idx >= len(_groq_clients):
-        return False
-    _groq_key_idx[0] = next_idx
-    print(f"  🔑 Switching to Groq key {next_idx + 1}/{len(_groq_clients)}")
-    return True
-
-
+# ── Prompts ───────────────────────────────────────────────────
 SYSTEM_PROMPT = """You are a legal metadata extractor for Supreme Court of India judgments.
 Return ONLY a valid JSON object. No markdown, no explanation, no code fences.
 Use "Unknown" for unknown strings, 0 for unknown integers.
@@ -98,6 +76,33 @@ Judgment text:
 """
 
 
+# ── Debug logging ─────────────────────────────────────────────
+def _log_debug(source_file: str, raw_response: dict, raw_text: str, parsed: dict):
+    """Save raw API response and parsed result to debug file."""
+    if not DEBUG_LOG:
+        return
+    os.makedirs(os.path.dirname(DEBUG_FILE), exist_ok=True)
+
+    # Load existing log or start fresh
+    existing = []
+    if os.path.exists(DEBUG_FILE):
+        try:
+            with open(DEBUG_FILE, "r", encoding="utf-8") as f:
+                existing = json.load(f)
+        except Exception:
+            existing = []
+
+    existing.append({
+        "source_file"  : source_file,
+        "raw_api_response": raw_response,
+        "extracted_text"  : raw_text,
+        "parsed_result"   : parsed,
+    })
+
+    with open(DEBUG_FILE, "w", encoding="utf-8") as f:
+        json.dump(existing, f, indent=2, ensure_ascii=False)
+
+
 # ── Header extraction ─────────────────────────────────────────
 def extract_header(full_text: str) -> str:
     content_markers = [
@@ -119,6 +124,9 @@ def extract_header(full_text: str) -> str:
 
 # ── JSON parsing ──────────────────────────────────────────────
 def parse_json_from_response(text: str) -> dict:
+    if not text:
+        return {}
+
     text = text.strip()
     text = re.sub(r"^```json\s*", "", text)
     text = re.sub(r"^```\s*",     "", text)
@@ -137,7 +145,7 @@ def parse_json_from_response(text: str) -> dict:
     return {}
 
 
-# ── Validation ────────────────────────────────────────────────
+# ── Fallback ──────────────────────────────────────────────────
 def get_fallback_metadata(source_file: str) -> dict:
     return {
         "case_name"      : "Unknown",
@@ -154,6 +162,7 @@ def get_fallback_metadata(source_file: str) -> dict:
     }
 
 
+# ── Validation ────────────────────────────────────────────────
 def validate_and_clean(raw: dict, source_file: str) -> dict:
     fallback = get_fallback_metadata(source_file)
 
@@ -182,10 +191,104 @@ def validate_and_clean(raw: dict, source_file: str) -> dict:
     }
 
 
-# ── Standard extraction (silent fallback) ────────────────────
+# ── REST API call ─────────────────────────────────────────────
+def _call_gemini_api(prompt: str) -> tuple[dict, str]:
+    """
+    Call gemini via REST API directly.
+    Returns (raw_api_response_dict, extracted_text_string).
+
+    Using REST instead of the google.genai SDK because the SDK
+    returns response.text = None for Gemini models — a known SDK
+    issue where non-Gemini models use a different response structure.
+    REST gives us the full raw JSON to inspect exactly what came back.
+    """
+    payload = {
+        "system_instruction": {
+            "parts": [{"text": SYSTEM_PROMPT}]
+        },
+        "contents": [
+            {
+                "role" : "user",
+                "parts": [{"text": prompt}]
+            }
+        ],
+        "generationConfig": {
+            "temperature"    : 0.0,
+            "maxOutputTokens": 1024,
+        }
+    }
+
+    response = requests.post(
+        GEMINI_API_URL,
+        headers = {"Content-Type": "application/json"},
+        json    = payload,
+        timeout = 60,
+    )
+
+    raw_dict = response.json()
+
+    if response.status_code != 200:
+        err = raw_dict.get("error", {})
+        status  = err.get("status", "")
+        message = err.get("message", str(raw_dict))
+        raise RuntimeError(f"API error {response.status_code} [{status}]: {message}")
+
+    # Extract text from response structure:
+    # { "candidates": [ { "content": { "parts": [ { "text": "..." } ] } } ] }
+    try:
+        text = raw_dict["candidates"][0]["content"]["parts"][0]["text"]
+    except (KeyError, IndexError, TypeError):
+        # Log the full response so we can see what structure came back
+        text = None
+
+    return raw_dict, text
+
+
+# ── Strict extraction ─────────────────────────────────────────
+def extract_metadata_strict(full_text: str, source_file: str) -> dict:
+    """
+    Hard extraction — raises on daily quota exhaustion.
+    Used by ingest.py so the pipeline stops cleanly.
+    """
+    header = extract_header(full_text)
+    prompt = USER_PROMPT_TEMPLATE.format(text=header)
+
+    while True:
+        try:
+            raw_api, raw_text = _call_gemini_api(prompt)
+            raw_dict          = parse_json_from_response(raw_text or "")
+
+            # Always log when DEBUG_LOG is True
+            _log_debug(source_file, raw_api, raw_text or "", raw_dict)
+
+            if not raw_dict:
+                raise ValueError(
+                    f"Could not parse JSON. Raw text was: {repr(raw_text)}"
+                )
+
+            return validate_and_clean(raw_dict, source_file)
+
+        except RuntimeError as e:
+            err = str(e)
+            if "429" in err or "RESOURCE_EXHAUSTED" in err or "quota" in err.lower():
+                if any(x in err.lower() for x in
+                       ["day", "daily", "per day", "requests per"]):
+                    raise RuntimeError(f"Gemini daily quota exhausted: {err}")
+                else:
+                    print(f"\n  ⏳ Gemini rate limit — waiting 30s...")
+                    time.sleep(30)
+                    continue
+            else:
+                raise
+
+        except Exception as e:
+            raise
+
+
+# ── Soft extraction ───────────────────────────────────────────
 def extract_metadata(full_text: str, source_file: str) -> dict:
     """
-    Soft extraction — catches all errors and returns fallback.
+    Soft extraction — catches all errors, returns Unknown fallback.
     Used by patch scripts and non-critical contexts.
     """
     try:
@@ -195,57 +298,7 @@ def extract_metadata(full_text: str, source_file: str) -> dict:
         return get_fallback_metadata(source_file)
 
 
-# ── Strict extraction (raises on API errors) ──────────────────
-def extract_metadata_strict(full_text: str, source_file: str) -> dict:
-    """
-    Hard extraction — raises on API rate limits and quota errors.
-    Used by ingest.py so the pipeline stops rather than
-    silently storing Unknown metadata.
-    """
-    header = extract_header(full_text)
-    prompt = USER_PROMPT_TEMPLATE.format(text=header)
-
-    while True:
-        try:
-            response = _get_groq_client().chat.completions.create(
-                model            = MODEL,
-                messages         = [
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user",   "content": prompt},
-                ],
-                temperature      = 0.0,
-                max_tokens       = 512,
-                reasoning_effort = "none",
-            )
-            raw_text = response.choices[0].message.content
-            raw_dict = parse_json_from_response(raw_text)
-
-            if not raw_dict:
-                raise ValueError("Could not parse metadata JSON from response")
-
-            return validate_and_clean(raw_dict, source_file)
-
-        except Exception as e:
-            err = str(e)
-            if "429" in err or "rate_limit" in err.lower() or "RESOURCE_EXHAUSTED" in err:
-                if any(x in err.lower() for x in ["day", "1000", "rpd", "daily", "quota"]):
-                    # Daily limit hit — try rotating to next key
-                    if _rotate_groq_key():
-                        continue
-                    else:
-                        raise RuntimeError(
-                            f"All Groq keys exhausted for today: {err}"
-                        )
-                else:
-                    # TPM limit — wait and retry same key
-                    print(f"\n  ⏳ Groq TPM limit — waiting 30s...")
-                    time.sleep(30)
-                    continue
-            else:
-                raise
-
-
-# ── Test ──────────────────────────────────────────────────────
+# ── Quick test ────────────────────────────────────────────────
 if __name__ == "__main__":
     sample = """
     A.K. Gopalan vs The State Of Madras Union Of India on 19 May, 1950
@@ -258,10 +311,20 @@ if __name__ == "__main__":
     The petitioner, a communist leader, was detained under the Preventive
     Detention Act, 1950. He challenged the constitutional validity of the
     Act contending that it violated Articles 13, 19, 21 and 22 of the
-    Constitution of India...
+    Constitution of India. The Supreme Court dismissed the petition.
     """
-    print("Testing metadata extraction...")
+
+    print(f"Testing metadata extraction with {GEMINI_MODEL} via REST...\n")
     result = extract_metadata(sample, "A_K_Gopalan_test.PDF")
+
     print("Extracted metadata:")
     for key, val in result.items():
         print(f"  {key:<18} : {val}")
+
+    if DEBUG_LOG and os.path.exists(DEBUG_FILE):
+        print(f"\nRaw debug output saved to: {DEBUG_FILE}")
+        with open(DEBUG_FILE, "r", encoding="utf-8") as f:
+            debug = json.load(f)
+        last = debug[-1]
+        print(f"Raw API response structure keys: {list(last['raw_api_response'].keys())}")
+        print(f"Extracted text: {repr(last['extracted_text'])}")

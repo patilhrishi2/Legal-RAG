@@ -26,6 +26,10 @@ BATCH_SIZE       = 25
 RPD_LIMIT        = 950
 CHECKPOINT_FILE  = "storage/ingestion_checkpoint.json"
 
+# TPM retry config
+TPM_WAIT_SECS  = 35
+TPM_MAX_RETRIES = 3
+
 
 # ── Gemini key rotation ───────────────────────────────────────
 def load_api_keys() -> list[str]:
@@ -35,10 +39,12 @@ def load_api_keys() -> list[str]:
         key = os.getenv(f"GEMINI_API_KEY_{i}")
         if not key:
             break
-        keys.append(key)
+        key = key.split("#")[0].strip().replace("\xa0", "")
+        if key:
+            keys.append(key)
         i += 1
     if not keys:
-        fallback = os.getenv("GEMINI_API_KEY")
+        fallback = os.getenv("GEMINI_API_KEY", "").strip()
         if fallback:
             keys.append(fallback)
     if not keys:
@@ -56,12 +62,31 @@ def get_client():
 
 
 def rotate_gemini_key() -> bool:
-    next_idx = current_key_idx[0] + 1
-    if next_idx >= len(API_KEYS):
-        return False
-    current_key_idx[0] = next_idx
-    print(f"\n  🔑 Switching to Gemini key {next_idx + 1}/{len(API_KEYS)}")
-    return True
+    while True:
+        next_idx = current_key_idx[0] + 1
+        if next_idx >= len(API_KEYS):
+            return False
+        current_key_idx[0] = next_idx
+        print(f"\n  🔑 Switching to Gemini key {next_idx + 1}/{len(API_KEYS)}")
+        return True
+
+
+def is_daily_quota_error(err: str) -> bool:
+    """
+    True only for daily RPD exhaustion.
+    False for TPM/RPM limits that should be retried with a wait.
+    """
+    err_lower = err.lower()
+    daily_signals = [
+        "per day",
+        "requests per day",
+        "daily limit",
+        "daily quota",
+        "quota exceeded",
+    ]
+    has_daily = any(x in err_lower for x in daily_signals)
+    is_tpm    = "token" in err_lower and "minute" in err_lower
+    return has_daily and not is_tpm
 
 
 # ── Checkpoint ────────────────────────────────────────────────
@@ -92,8 +117,9 @@ def extract_text(pdf_path: str) -> str:
                     t = page.extract_text()
                     if t:
                         full_text += t + "\n"
-                except Exception:
-                    continue   # skip bad pages, don't crash
+                except Exception as page_err:
+                    print(f"  ⚠️  Page read error (skipping page): {page_err}")
+                    continue
     except Exception as e:
         print(f"  ⚠️  PDF read error: {e}")
     return full_text
@@ -114,24 +140,29 @@ def chunk_text(text: str) -> list[str]:
 # ── Chunks → embeddings ───────────────────────────────────────
 def embed_texts(texts: list[str], rpm_counter: list) -> list[list[float]]:
     """
-    Returns:
-      list of vectors  → success
-      []               → RPD limit hit on all keys (stop ingestion)
-    Raises on unexpected errors.
+    Embed all chunks with Gemini embedding-001.
+
+    TPM/RPM hit  → wait TPM_WAIT_SECS, retry same key, max TPM_MAX_RETRIES
+                   if still failing after max retries → rotate to next key
+    Daily RPD    → rotate key immediately
+    403          → rotate key immediately (bad account)
+    All keys gone → return [] to stop ingestion
     """
     all_vectors = []
 
     for i in range(0, len(texts), BATCH_SIZE):
-        # Check RPD for current key
+
+        # Pre-check RPD counter
         if rpm_counter[0] >= RPD_LIMIT:
+            print(f"\n  ⚠️  RPD counter {rpm_counter[0]} reached limit — rotating key")
             if rotate_gemini_key():
                 rpm_counter[0] = 0
-                print(f"  Continuing with new Gemini key...")
             else:
-                print(f"\n  🛑 All Gemini keys exhausted for today.")
+                print(f"\n  🛑 All Gemini keys exhausted (RPD counter).")
                 return []
 
-        batch = texts[i : i + BATCH_SIZE]
+        batch        = texts[i : i + BATCH_SIZE]
+        tpm_retries  = 0   # reset per batch
 
         while True:
             try:
@@ -145,33 +176,77 @@ def embed_texts(texts: list[str], rpm_counter: list) -> list[list[float]]:
                 )
                 all_vectors.extend([e.values for e in result.embeddings])
                 rpm_counter[0] += 1
-                total_calls = rpm_counter[0] + current_key_idx[0] * RPD_LIMIT
+                total_calls     = rpm_counter[0] + current_key_idx[0] * RPD_LIMIT
                 print(
                     f"    embedded {min(i+BATCH_SIZE, len(texts))}/{len(texts)} chunks "
-                    f"[key {current_key_idx[0]+1}, calls today: {rpm_counter[0]}/{RPD_LIMIT}, "
+                    f"[key {current_key_idx[0]+1}/{len(API_KEYS)}, "
+                    f"calls: {rpm_counter[0]}/{RPD_LIMIT}, "
                     f"total: {total_calls}]",
                     end="\r"
                 )
                 time.sleep(2)
-                break
+                break   # success → next batch
 
             except Exception as e:
-                err = str(e)
-                if "429" in err or "RESOURCE_EXHAUSTED" in err:
-                    if any(x in err.lower() for x in ["day", "quota", "daily"]):
-                        # Daily quota hit — rotate key
-                        print(f"\n  ⚠️  Gemini daily quota hit")
+                err     = str(e)
+                err_low = err.lower()
+
+                # ── 403 — bad key, skip immediately ──────────
+                if "403" in err or "permission_denied" in err_low:
+                    print(f"\n  ⛔ Key {current_key_idx[0]+1} — 403 "
+                          f"PERMISSION_DENIED, skipping key")
+                    print(f"     {err[:200]}")
+                    if rotate_gemini_key():
+                        rpm_counter[0] = 0
+                        tpm_retries    = 0
+                        # continue while loop → retry batch with new key
+                    else:
+                        print(f"  🛑 All Gemini keys exhausted (403).")
+                        return []
+
+                # ── 429 / RESOURCE_EXHAUSTED ─────────────────
+                elif "429" in err or "resource_exhausted" in err_low:
+
+                    if is_daily_quota_error(err):
+                        # True daily RPD exhaustion → rotate key
+                        print(f"\n  ⚠️  Key {current_key_idx[0]+1}: "
+                              f"daily quota exhausted → rotating")
+                        print(f"     {err[:300]}")
                         if rotate_gemini_key():
                             rpm_counter[0] = 0
+                            tpm_retries    = 0
                         else:
-                            print(f"  🛑 All Gemini keys exhausted.")
+                            print(f"  🛑 All Gemini keys exhausted (RPD).")
                             return []
+
                     else:
-                        # TPM hit — wait and retry
-                        print(f"\n  ⏳ Gemini TPM limit — waiting 60s...")
-                        time.sleep(60)
+                        # TPM/RPM limit
+                        tpm_retries += 1
+                        if tpm_retries <= TPM_MAX_RETRIES:
+                            print(f"\n  ⏳ Key {current_key_idx[0]+1}: "
+                                  f"TPM/RPM limit "
+                                  f"(retry {tpm_retries}/{TPM_MAX_RETRIES}) "
+                                  f"— waiting {TPM_WAIT_SECS}s...")
+                            print(f"     {err[:300]}")
+                            time.sleep(TPM_WAIT_SECS)
+                            # continue while loop → retry same key
+                        else:
+                            # Max retries hit → rotate key
+                            print(f"\n  ⚠️  Key {current_key_idx[0]+1}: "
+                                  f"still rate limited after "
+                                  f"{TPM_MAX_RETRIES} retries → rotating key")
+                            if rotate_gemini_key():
+                                rpm_counter[0] = 0
+                                tpm_retries    = 0
+                            else:
+                                print(f"  🛑 All Gemini keys exhausted "
+                                      f"(TPM max retries).")
+                                return []
+
+                # ── Any other error ───────────────────────────
                 else:
-                    raise   # unexpected error — bubble up
+                    print(f"\n  ❌ Unexpected embedding error: {err[:400]}")
+                    raise
 
     return all_vectors
 
@@ -190,42 +265,40 @@ def ingest_pdf(pdf_path: str, collection, rpm_counter: list) -> int:
     """
     Returns:
        N > 0  → N chunks added successfully
-       0      → file was empty or unreadable (skip, mark done)
-      -1      → Gemini RPD exhausted (stop ingestion)
-    Raises on metadata API errors (Groq quota exhausted).
+       0      → file empty or unreadable
+      -1      → all Gemini keys exhausted
+    Raises RuntimeError on metadata quota exhaustion.
     """
     filename = os.path.basename(pdf_path)
 
-    # Extract text
     text = extract_text(pdf_path)
     if not text.strip():
         print(f"  ⚠️  No extractable text — skipping")
         return 0
 
-    # Extract metadata — STRICT: raises on API errors
     print(f"  ⏳ Extracting metadata...")
     meta = extract_metadata_strict(text, filename)
     print(f"  ✓ {meta['case_name'][:60]} | {meta['legal_domain']}")
 
-    # Chunk
     chunks = chunk_text(text)
     if not chunks:
         return 0
     print(f"  ✓ {len(chunks)} chunks")
 
-    # Embed
     print(f"  ⏳ Embedding...")
     vectors = embed_texts(chunks, rpm_counter)
 
     if not vectors:
-        return -1   # Gemini keys exhausted
-
-    if len(vectors) != len(chunks):
-        # Partial result — keys exhausted mid-file
-        print(f"\n  ⚠️  Partial embedding — stopping to maintain consistency")
+        # Keys exhausted — do NOT write to ChromaDB or checkpoint
+        # File will be retried next run
         return -1
 
-    # Store
+    if len(vectors) != len(chunks):
+        print(f"\n  ⚠️  Partial embedding ({len(vectors)}/{len(chunks)}) "
+              f"— not writing to DB, will retry next run")
+        return -1
+
+    # Only write to ChromaDB after full successful embedding
     doc_id    = filename.replace(".pdf","").replace(".PDF","").replace(" ","_")
     ids       = [f"{doc_id}__chunk_{i}" for i in range(len(chunks))]
     metadatas = [meta.copy() for _ in chunks]
@@ -308,40 +381,43 @@ def run_ingestion(year: str = None, source_dir: str = None):
             result = ingest_pdf(path, collection, rpm_counter)
 
         except RuntimeError as e:
-            # Groq keys exhausted — hard stop
-            err = str(e)
-            print(f"\n  🛑 Metadata API exhausted: {err}")
-            print(f"     Add more GROQ_API_KEY_N keys to .env or wait until tomorrow.")
-            print(f"     Progress saved — run again to continue from here.")
+            # Metadata keys all exhausted — hard stop
+            # Do NOT add to checkpoint — file must be retried
+            print(f"\n  🛑 Metadata API exhausted: {e}")
+            print(f"     Progress saved. Run again tomorrow to continue.")
             limit_hit = True
             break
 
         except Exception as e:
-            # Unexpected error — skip file, continue
-            print(f"\n  ⚠️  Unexpected error: {e}")
-            print(f"     Skipping file and continuing...")
-            ingested_set.add(filename)
-            save_checkpoint(ingested_set)
+            # Unexpected error — log fully
+            # Do NOT add to checkpoint — may be transient, retry next run
+            print(f"\n  ⚠️  Unexpected error on {filename}:")
+            print(f"     {type(e).__name__}: {e}")
+            print(f"     Not adding to checkpoint — will retry next run")
+            # intentionally NOT doing: ingested_set.add(filename)
             continue
 
         if result == -1:
-            # Gemini keys exhausted
+            # Keys exhausted — stop, do NOT add to checkpoint
             limit_hit = True
-            print(f"\n  🛑 Gemini embedding keys exhausted. Progress saved.")
+            print(f"\n  🛑 All Gemini embedding keys exhausted. Progress saved.")
             break
 
         if result > 0:
+            # SUCCESS — only now add to checkpoint
             total_chunks  += result
             ingested_set.add(filename)
             save_checkpoint(ingested_set)
             processed     += 1
             print(f"\n  ✓ {result} chunks | total in index: {collection.count()}")
+
         else:
-            # Empty file — mark done, skip
+            # Empty or unreadable file — safe to mark done permanently
             ingested_set.add(filename)
             save_checkpoint(ingested_set)
+            print(f"  ⚠️  Empty file — marked as done, will not retry")
 
-    # Rebuild BM25 if anything was added
+    # Rebuild BM25 only if new chunks added
     if total_chunks > 0:
         print(f"\n🔨 Rebuilding BM25 index...")
         from bm25_index import build_and_save
@@ -356,10 +432,10 @@ def run_ingestion(year: str = None, source_dir: str = None):
     print(f"  Chunks added this run    : {total_chunks}")
     print(f"  Total chunks in index    : {collection.count()}")
     print(f"  Total files ingested     : {len(ingested_set)}")
-    print(f"  Gemini calls this run    : {rpm_counter[0]}")
+    print(f"  Embedding API calls      : {rpm_counter[0]} (current key)")
     if limit_hit:
-        print(f"  Files remaining          : {remaining}")
-        print(f"  ⚠️  Run again tomorrow (or with new keys) to continue")
+        print(f"  Files remaining in dir   : {remaining}")
+        print(f"  ⚠️  Run again tomorrow or with new keys to continue")
     else:
         print(f"  ✅ Year complete")
     print(f"{'═'*55}\n")

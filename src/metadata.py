@@ -11,19 +11,60 @@ load_dotenv()
 
 # ── Config ────────────────────────────────────────────────────
 HEADER_WORD_COUNT = 3000
-API_KEY           = os.getenv("GEMINI_API_KEY_1") or os.getenv("GEMINI_API_KEY")
 
-# Using REST API directly — more reliable for Gemini than the SDK
-# which has known issues with response.text returning None for non-Gemini models
-GEMINI_MODEL   = "gemini-3.5-flash-lite"
-GEMINI_API_URL = (
-    f"https://generativelanguage.googleapis.com/v1beta/models/"
-    f"{GEMINI_MODEL}:generateContent?key={API_KEY}"
-)
+# Google AI Studio silently maps model strings — use the one that works.
+# Confirmed working via debug output: gemini-3.5-flash-lite
+GEMMA_MODEL = "gemini-3.5-flash-lite"
 
-# Set to True temporarily to log raw API responses for debugging
-DEBUG_LOG = True
+# Rate limits per key: 15 RPM, 500 RPD, 250K TPM
+# With 10 keys: 5,000 files/day capacity
+RPD_LIMIT_METADATA = 490   # stop at 490/500 to leave headroom per key
+
+# Debug logging — set False once confirmed working at scale
+DEBUG_LOG  = False
 DEBUG_FILE = "storage/metadata_debug.json"
+
+
+# ── Key management ────────────────────────────────────────────
+def _load_gemini_keys() -> list[str]:
+    keys = []
+    i = 1
+    while True:
+        key = os.getenv(f"GEMINI_API_KEY_{i}")
+        if not key:
+            break
+        key = key.split("#")[0].strip().replace("\xa0", "")
+        if key:
+            keys.append(key)
+        i += 1
+    if not keys:
+        fallback = os.getenv("GEMINI_API_KEY", "").strip()
+        if fallback:
+            keys.append(fallback)
+    if not keys:
+        raise RuntimeError("No Gemini API keys found in .env")
+    return keys
+
+
+_gemini_keys      = _load_gemini_keys()
+_meta_key_idx     = [0]
+_meta_key_counter = [0]   # RPD calls on current key
+
+
+def _get_api_key() -> str:
+    return _gemini_keys[_meta_key_idx[0]]
+
+
+def _rotate_metadata_key() -> bool:
+    """Rotate to next key. Returns True if a new key is available."""
+    next_idx = _meta_key_idx[0] + 1
+    if next_idx >= len(_gemini_keys):
+        return False
+    _meta_key_idx[0]     = next_idx
+    _meta_key_counter[0] = 0
+    print(f"\n  🔑 Metadata: switching to Gemini key "
+          f"{next_idx + 1}/{len(_gemini_keys)}")
+    return True
 
 
 # ── Prompts ───────────────────────────────────────────────────
@@ -76,33 +117,6 @@ Judgment text:
 """
 
 
-# ── Debug logging ─────────────────────────────────────────────
-def _log_debug(source_file: str, raw_response: dict, raw_text: str, parsed: dict):
-    """Save raw API response and parsed result to debug file."""
-    if not DEBUG_LOG:
-        return
-    os.makedirs(os.path.dirname(DEBUG_FILE), exist_ok=True)
-
-    # Load existing log or start fresh
-    existing = []
-    if os.path.exists(DEBUG_FILE):
-        try:
-            with open(DEBUG_FILE, "r", encoding="utf-8") as f:
-                existing = json.load(f)
-        except Exception:
-            existing = []
-
-    existing.append({
-        "source_file"  : source_file,
-        "raw_api_response": raw_response,
-        "extracted_text"  : raw_text,
-        "parsed_result"   : parsed,
-    })
-
-    with open(DEBUG_FILE, "w", encoding="utf-8") as f:
-        json.dump(existing, f, indent=2, ensure_ascii=False)
-
-
 # ── Header extraction ─────────────────────────────────────────
 def extract_header(full_text: str) -> str:
     content_markers = [
@@ -126,13 +140,11 @@ def extract_header(full_text: str) -> str:
 def parse_json_from_response(text: str) -> dict:
     if not text:
         return {}
-
     text = text.strip()
     text = re.sub(r"^```json\s*", "", text)
     text = re.sub(r"^```\s*",     "", text)
     text = re.sub(r"\s*```$",     "", text)
     text = text.strip()
-
     try:
         return json.loads(text)
     except json.JSONDecodeError:
@@ -143,6 +155,29 @@ def parse_json_from_response(text: str) -> dict:
             except json.JSONDecodeError:
                 pass
     return {}
+
+
+# ── Debug logging ─────────────────────────────────────────────
+def _log_debug(source_file: str, raw_response: dict,
+               raw_text: str, parsed: dict):
+    if not DEBUG_LOG:
+        return
+    os.makedirs(os.path.dirname(DEBUG_FILE), exist_ok=True)
+    existing = []
+    if os.path.exists(DEBUG_FILE):
+        try:
+            with open(DEBUG_FILE, "r", encoding="utf-8") as f:
+                existing = json.load(f)
+        except Exception:
+            existing = []
+    existing.append({
+        "source_file"     : source_file,
+        "raw_api_response": raw_response,
+        "extracted_text"  : raw_text,
+        "parsed_result"   : parsed,
+    })
+    with open(DEBUG_FILE, "w", encoding="utf-8") as f:
+        json.dump(existing, f, indent=2, ensure_ascii=False)
 
 
 # ── Fallback ──────────────────────────────────────────────────
@@ -192,16 +227,17 @@ def validate_and_clean(raw: dict, source_file: str) -> dict:
 
 
 # ── REST API call ─────────────────────────────────────────────
-def _call_gemini_api(prompt: str) -> tuple[dict, str]:
+def _call_metadata_api(prompt: str) -> tuple[dict, str]:
     """
-    Call gemini via REST API directly.
-    Returns (raw_api_response_dict, extracted_text_string).
+    Call via REST API directly.
+    Returns (raw_response_dict, extracted_text).
+    """
+    api_key = _get_api_key()
+    url     = (
+        f"https://generativelanguage.googleapis.com/v1beta/models/"
+        f"{GEMMA_MODEL}:generateContent?key={api_key}"
+    )
 
-    Using REST instead of the google.genai SDK because the SDK
-    returns response.text = None for Gemini models — a known SDK
-    issue where non-Gemini models use a different response structure.
-    REST gives us the full raw JSON to inspect exactly what came back.
-    """
     payload = {
         "system_instruction": {
             "parts": [{"text": SYSTEM_PROMPT}]
@@ -214,12 +250,12 @@ def _call_gemini_api(prompt: str) -> tuple[dict, str]:
         ],
         "generationConfig": {
             "temperature"    : 0.0,
-            "maxOutputTokens": 1024,
+            "maxOutputTokens": 512,
         }
     }
 
     response = requests.post(
-        GEMINI_API_URL,
+        url,
         headers = {"Content-Type": "application/json"},
         json    = payload,
         timeout = 60,
@@ -228,17 +264,15 @@ def _call_gemini_api(prompt: str) -> tuple[dict, str]:
     raw_dict = response.json()
 
     if response.status_code != 200:
-        err = raw_dict.get("error", {})
-        status  = err.get("status", "")
+        err     = raw_dict.get("error", {})
+        status  = err.get("status",  "")
         message = err.get("message", str(raw_dict))
-        raise RuntimeError(f"API error {response.status_code} [{status}]: {message}")
+        code    = str(response.status_code)
+        raise RuntimeError(f"API {code} [{status}]: {message}")
 
-    # Extract text from response structure:
-    # { "candidates": [ { "content": { "parts": [ { "text": "..." } ] } } ] }
     try:
         text = raw_dict["candidates"][0]["content"]["parts"][0]["text"]
     except (KeyError, IndexError, TypeError):
-        # Log the full response so we can see what structure came back
         text = None
 
     return raw_dict, text
@@ -247,41 +281,67 @@ def _call_gemini_api(prompt: str) -> tuple[dict, str]:
 # ── Strict extraction ─────────────────────────────────────────
 def extract_metadata_strict(full_text: str, source_file: str) -> dict:
     """
-    Hard extraction — raises on daily quota exhaustion.
-    Used by ingest.py so the pipeline stops cleanly.
+    Hard extraction — raises RuntimeError on daily quota exhaustion.
+    Used by ingest.py so the pipeline stops cleanly rather than
+    silently storing Unknown metadata.
     """
     header = extract_header(full_text)
     prompt = USER_PROMPT_TEMPLATE.format(text=header)
 
     while True:
-        try:
-            raw_api, raw_text = _call_gemini_api(prompt)
-            raw_dict          = parse_json_from_response(raw_text or "")
+        # Check RPD for current key before making call
+        if _meta_key_counter[0] >= RPD_LIMIT_METADATA:
+            if _rotate_metadata_key():
+                pass   # counter already reset in rotate
+            else:
+                raise RuntimeError(
+                    "All Gemini keys exhausted for metadata extraction today."
+                )
 
-            # Always log when DEBUG_LOG is True
+        try:
+            raw_api, raw_text = _call_metadata_api(prompt)
+            _meta_key_counter[0] += 1
+
+            _log_debug(source_file, raw_api, raw_text or "", {})
+
+            raw_dict = parse_json_from_response(raw_text or "")
+
             _log_debug(source_file, raw_api, raw_text or "", raw_dict)
 
             if not raw_dict:
                 raise ValueError(
-                    f"Could not parse JSON. Raw text was: {repr(raw_text)}"
+                    f"Empty parse result. Raw text: {repr(raw_text)}"
                 )
 
             return validate_and_clean(raw_dict, source_file)
 
         except RuntimeError as e:
             err = str(e)
-            if "429" in err or "RESOURCE_EXHAUSTED" in err or "quota" in err.lower():
-                if any(x in err.lower() for x in
-                       ["day", "daily", "per day", "requests per"]):
-                    raise RuntimeError(f"Gemini daily quota exhausted: {err}")
-                else:
-                    print(f"\n  ⏳ Gemini rate limit — waiting 30s...")
-                    time.sleep(30)
+            # Check for daily quota in the error message
+            if any(x in err.lower() for x in
+                   ["429", "resource_exhausted", "quota",
+                    "day", "daily", "per day"]):
+                if _rotate_metadata_key():
                     continue
-            else:
-                raise
+                raise RuntimeError(
+                    f"All Gemini metadata keys exhausted: {err}"
+                )
+            raise
 
         except Exception as e:
+            err = str(e)
+            if any(x in err.lower() for x in
+                   ["429", "resource_exhausted", "quota"]):
+                if "day" in err.lower() or "daily" in err.lower():
+                    if _rotate_metadata_key():
+                        continue
+                    raise RuntimeError(
+                        f"All Gemini metadata keys exhausted: {err}"
+                    )
+                else:
+                    print(f"\n  ⏳ Metadata rate limit — waiting 30s...")
+                    time.sleep(30)
+                    continue
             raise
 
 
@@ -289,7 +349,7 @@ def extract_metadata_strict(full_text: str, source_file: str) -> dict:
 def extract_metadata(full_text: str, source_file: str) -> dict:
     """
     Soft extraction — catches all errors, returns Unknown fallback.
-    Used by patch scripts and non-critical contexts.
+    Use extract_metadata_strict for ingestion.
     """
     try:
         return extract_metadata_strict(full_text, source_file)
@@ -314,17 +374,10 @@ if __name__ == "__main__":
     Constitution of India. The Supreme Court dismissed the petition.
     """
 
-    print(f"Testing metadata extraction with {GEMINI_MODEL} via REST...\n")
+    print(f"Testing with {GEMMA_MODEL} via REST...\n")
     result = extract_metadata(sample, "A_K_Gopalan_test.PDF")
-
     print("Extracted metadata:")
     for key, val in result.items():
         print(f"  {key:<18} : {val}")
-
-    if DEBUG_LOG and os.path.exists(DEBUG_FILE):
-        print(f"\nRaw debug output saved to: {DEBUG_FILE}")
-        with open(DEBUG_FILE, "r", encoding="utf-8") as f:
-            debug = json.load(f)
-        last = debug[-1]
-        print(f"Raw API response structure keys: {list(last['raw_api_response'].keys())}")
-        print(f"Extracted text: {repr(last['extracted_text'])}")
+    if DEBUG_LOG:
+        print(f"\nDebug saved to: {DEBUG_FILE}")

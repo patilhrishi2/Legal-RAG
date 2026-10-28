@@ -12,3 +12,10 @@ test_raw_output.py
 test_raw_output.json
 test_metadata_models.py
 raw_gemma_output.txt
+venv311
+count_files.py
+qwen_speed_test.py
+storage_v2
+src/peek.py
+src/peek2.py
+src/peek3.py

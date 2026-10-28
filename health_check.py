@@ -323,6 +323,11 @@ def run_health_check(
     }
 
 
+def save_checkpoint(ingested: set):
+    os.makedirs(os.path.dirname(CHECKPOINT_FILE), exist_ok=True)
+    with open(CHECKPOINT_FILE, "w") as f:
+        json.dump({"ingested": list(ingested), "count": len(ingested)}, f)
+
 # ── Fix checkpoint ────────────────────────────────────────────
 def fix_checkpoint():
     """

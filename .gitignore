@@ -21,3 +21,5 @@ src/peek2.py
 src/peek3.py
 storage_v2_copy
 ingestion_terminal_code.txt
+.vscode/
+requirements_before_llamaindex.txt

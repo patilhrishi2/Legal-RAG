@@ -6,7 +6,7 @@ sys.path.insert(0, "src"); sys.path.insert(0, "v12")
 
 from langgraph.graph import StateGraph, END
 import langchain_rag as lr
-from contradiction import detect_contradictions
+from guardrails import detect_contradictions_verified as detect_contradictions
 from generator import generate_answer
 from strategist import generate_strategy
 
@@ -113,3 +113,4 @@ if __name__ == "__main__":
     st = out["strategy"]
     print("\nSTRENGTH:", st.get("strength_assessment"), "| CONFIDENCE:", st.get("confidence"))
     print("RECOMMENDED:\n", st.get("recommended_strategy") or st.get("error"))
+    print("RISKS:\n", st.get("risk_factors"))

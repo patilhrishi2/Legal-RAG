@@ -23,3 +23,4 @@ storage_v2_copy
 ingestion_terminal_code.txt
 .vscode/
 requirements_before_llamaindex.txt
+requirements_before_langgraph.txt

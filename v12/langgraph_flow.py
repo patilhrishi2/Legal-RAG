@@ -13,7 +13,9 @@ from dotenv import load_dotenv
 load_dotenv()
 from langfuse import get_client
 from langfuse.langchain import CallbackHandler
-
+import store
+from headnote import load_notes, judge_dissented
+_c = store.connect(); NOTES = load_notes(_c); _c.close()
 
 class State(TypedDict, total=False):
     question: str
@@ -28,8 +30,14 @@ def to_chunk(d, rank):
     m = d.metadata
     cid = d.id or ""
     op = m.get("opinion", "")
-    label = (f"[Opinion of {op} J.] " if op
-             else "[Judge not identified: lead judgment or unsigned] ")
+    dis, held = NOTES.get(m.get("source_file", ""), ([], ""))
+    tag = f"[Opinion of {op} J.]" if op else "[Judge not identified: lead judgment or unsigned]"
+    if dis:
+        names = ", ".join(sorted({d for d in dis if len(d.split()) <= 3}))
+        tag += f" [Headnote: dissent recorded by {names} on at least one point; the Court's majority view may differ from any single judge's]"
+        if judge_dissented(op, dis):
+            tag += " [this judge is among the dissenters]"
+    label = tag + " "
     return {
         "text": label + d.page_content, "id": cid, "score": 1.0 / rank, "rrf_score": 1.0 / rank,
         "chunk_num": int(cid.rsplit("__chunk_", 1)[1]) if "__chunk_" in cid else -1,

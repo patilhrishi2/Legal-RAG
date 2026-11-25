@@ -11,7 +11,8 @@ EXTRA_RULES = """
 ADDITIONAL RULES (override anything above):
 7. A "CONTRADICTIONS IN PRECEDENTS" section is an UNVERIFIED claim by another tool. Never say a case was overruled, followed or distinguished unless an excerpt's own text says so.
 8. If a contradiction claim is not supported by the excerpts, ignore it in your strategy and list it under RISK FACTORS as "unverified claim".
-9. If you ignore a claim, do not let it raise STRENGTH ASSESSMENT or CONFIDENCE."""
+9. If you ignore a claim, do not let it raise STRENGTH ASSESSMENT or CONFIDENCE.
+10. Never write "the Court held X" unless an excerpt states the Court's holding. Otherwise attribute the view to the named judge. If a headnote note says a judge dissented, do not present that judge's view as the Court's."""
 if EXTRA_RULES not in S.SYSTEM_PROMPT:
     S.SYSTEM_PROMPT += EXTRA_RULES
 

@@ -24,3 +24,4 @@ ingestion_terminal_code.txt
 .vscode/
 requirements_before_llamaindex.txt
 requirements_before_langgraph.txt
+requirements_before_langfuse.txt

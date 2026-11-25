@@ -9,6 +9,10 @@ import langchain_rag as lr
 from guardrails import detect_contradictions_verified as detect_contradictions
 from generator import generate_answer
 from strategist import generate_strategy
+from dotenv import load_dotenv
+load_dotenv()
+from langfuse import get_client
+from langfuse.langchain import CallbackHandler
 
 
 class State(TypedDict, total=False):
@@ -23,10 +27,13 @@ class State(TypedDict, total=False):
 def to_chunk(d, rank):
     m = d.metadata
     cid = d.id or ""
+    op = m.get("opinion", "")
+    label = (f"[Opinion of {op} J.] " if op
+             else "[Judge not identified: lead judgment or unsigned] ")
     return {
-        "text": d.page_content, "id": cid, "score": 1.0 / rank, "rrf_score": 1.0 / rank,
+        "text": label + d.page_content, "id": cid, "score": 1.0 / rank, "rrf_score": 1.0 / rank,
         "chunk_num": int(cid.rsplit("__chunk_", 1)[1]) if "__chunk_" in cid else -1,
-        "opinion": m.get("opinion", ""),
+        "opinion": op,
         **{k: m.get(k, dflt) for k, dflt in [
             ("case_name", "Unknown"), ("citation", "Unknown"), ("year", 0),
             ("bench_type", "Unknown"), ("bench_size", 0), ("legal_domain", "Unknown"),
@@ -105,7 +112,12 @@ if __name__ == "__main__":
     ap.add_argument("--ask", required=True)
     ap.add_argument("--force-conflict", action="store_true")
     a = ap.parse_args()
-    out = build(a.force_conflict).invoke({"question": a.ask})
+    handler = CallbackHandler()
+    out = build(a.force_conflict).invoke(
+        {"question": a.ask},
+        config={"callbacks": [handler], "run_name": "legal-strategy-flow"},
+    )
+    get_client().flush()      # make sure the trace is sent before the script exits
     print("\nPATH:", " -> ".join(out["path"]))
     print("\nCONTRADICTIONS:", out["contradictions"].get("contradictions_found"),
           "|", out["contradictions"].get("analysis_note", "")[:120])
